@@ -1,0 +1,22 @@
+[package]
+name = "mqtt"
+version = "0.1.0"
+edition = "2021"
+description = "Publishes calls, unit activity and system status to an MQTT broker."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/taclane/trunk-plugin-mqtt"
+authors = ["Taclane"]
+publish = false
+
+[dependencies]
+trunk-recorder-plugin = "0.1.1"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider", "websocket"] }
+# ring rather than aws-lc: no cmake or NASM for the release builds.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+
+[profile.release]
+strip = true
+lto = true
