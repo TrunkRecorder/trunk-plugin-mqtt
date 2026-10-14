@@ -17,7 +17,7 @@ so existing consumers (Home Assistant, Node-RED, dashboards) read them unchanged
 ## Install
 
 In Trunk Recorder Pro, open **Plugins**, choose **Install from GitHub…**, and enter
-`taclane/trunk-plugin-mqtt`. Then turn it on and fill in its settings in
+`TrunkRecorder/trunk-plugin-mqtt`. Then turn it on and fill in its settings in
 **Setup → Plugins**.
 
 To build it yourself:
