@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "rumqttc",
  "rustls",
@@ -904,9 +904,8 @@ dependencies = [
 
 [[package]]
 name = "trunk-recorder-plugin"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64b866fd259e0bab0d9c2d1c9163629f9e8c2379be0735ddfbe7a2d7b81e5f12"
+version = "0.3.0"
+source = "git+https://github.com/TrunkRecorder/trunk-recorder-pro?tag=v0.1.11#385a43a70d1a68e443afc741d12d8838ab82f438"
 dependencies = [
  "schemars",
  "serde",

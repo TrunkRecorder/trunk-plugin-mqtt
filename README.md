@@ -12,6 +12,7 @@ so existing consumers (Home Assistant, Node-RED, dashboards) read them unchanged
 - An outbound queue with age and size limits, so a slow or unreachable broker never holds up recording
 - Pings and a heartbeat topic; a broker that stops answering is reconnected
 - Retained `config`, `systems` and status topics, sent again after each reconnect
+- The broker's state, the queue and what's been sent, on Trunk Recorder Pro's dashboard
 
 ## Install
 
@@ -66,6 +67,7 @@ Every message is JSON: `{"type": <subtopic>, <name>: <data>, "timestamp": <unix 
 | topic | `calls_active` | | Active calls, every second |
 | topic | `call_start` | | A call started |
 | topic | `call_end` | | A recorded call is complete |
+| topic | `call_ignored` | | A call ended without being recorded, and why |
 | topic | `audio` | | Audio and metadata of a recorded call |
 | topic/trunk_recorder | `status` | ✓ | `connected`, or `disconnected` (also the last will) |
 | topic/trunk_recorder | `heartbeat` | | QoS 1, every `heartbeatInterval` seconds |
@@ -79,8 +81,22 @@ Every message is JSON: `{"type": <subtopic>, <name>: <data>, "timestamp": <unix 
 | unitTopic/shortname | `ans_req` | | Answer request |
 | unitTopic/shortname | `location` | | Location registration |
 | unitTopic/shortname | `call_alert` | | Unit-to-unit page |
+| unitTopic/shortname | `emergency` | | Emergency alarm |
 
 Message fields match the Trunk Recorder plugin's [example messages](https://github.com/TrunkRecorder/tr-plugin-mqtt/blob/main/example_messages.md).
+
+### Additions
+
+Trunk Recorder Pro reports some things Trunk Recorder doesn't, and these are added
+(see [example messages](example_messages.md)):
+
+- `call_ignored`: a call that wasn't recorded, with its `reason` (`encrypted`, `unknown_tg`,
+  `ignored`, `no_recorder`, `no_source`)
+- `emergency`: a radio's emergency alarm, with its talkgroup
+- In `call_end`: `snr` and `clean_voice_pct`, when measured
+- In call messages: `decrypted`, and `algid` and `key_id` once the call's voice has named its
+  cipher (`132` is AES-256)
+- In unit `end`: `lat` and `lon`, when the radio sent its position
 
 ### Differences from the Trunk Recorder plugin
 
@@ -94,6 +110,11 @@ Trunk Recorder Pro doesn't report everything Trunk Recorder does. These are not 
 
 Talkgroup and unit names in unit messages come from calls already heard, so
 the first messages for a talkgroup or radio may have empty names.
+
+A call that was recorded but then not saved (no audio, or shorter than its
+system's minimum) gets neither `call_end` nor `call_ignored`: the recorder
+tells plugins only that it ended, as a recorded call. This is to be fixed in
+Trunk Recorder Pro, by giving such calls a reason (`too_short`), not here.
 
 ## License
 
