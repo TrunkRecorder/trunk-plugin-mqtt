@@ -13,6 +13,7 @@ so existing consumers (Home Assistant, Node-RED, dashboards) read them unchanged
 - Pings and a heartbeat topic; a broker that stops answering is reconnected
 - Retained `config`, `systems` and status topics, sent again after each reconnect
 - The broker's state, the queue and what's been sent, on Trunk Recorder Pro's dashboard
+- Optional [Home Assistant discovery](#home-assistant): the recorder's entities appear on their own
 
 ## Install
 
@@ -48,6 +49,8 @@ and add `target/release/mqtt` with **Add from a file…**.
 | Queue size limit | `queueMaxMb` | `32` | MB of waiting messages; past this, the oldest are dropped |
 | Heartbeat interval | `heartbeatInterval` | `10` | Seconds between pings and heartbeat messages (minimum 5). `0` turns them off. |
 | Broker timeout | `heartbeatTimeout` | `30` | Seconds a connection attempt or a send may take. Raise it for audio over a slow uplink. |
+| Home Assistant discovery | `homeAssistant` | `false` | Publish Home Assistant's [MQTT discovery](#home-assistant) messages |
+| Discovery prefix | `discoveryPrefix` | `homeassistant` | The prefix Home Assistant's MQTT integration listens under |
 
 The Trunk Recorder plugin's keys (`unit_topic`, `mqtt_audio`, `queue_max_age`, …)
 are accepted too, so its settings can be pasted in as they are.
@@ -115,6 +118,30 @@ A call that was recorded but then not saved (no audio, or shorter than its
 system's minimum) gets neither `call_end` nor `call_ignored`: the recorder
 tells plugins only that it ended, as a recorded call. This is to be fixed in
 Trunk Recorder Pro, by giving such calls a reason (`too_short`), not here.
+
+## Home Assistant
+
+Turn on **Home Assistant discovery** and Home Assistant's MQTT integration adds a
+device for the recorder, with no YAML:
+
+| Entity | Reads |
+| ------ | ----- |
+| Recorder (connectivity) | `topic/trunk_recorder/status` |
+| Active calls | `topic/calls_active` |
+| Last call (its talkgroup; the rest as attributes) | `topic/call_end` |
+| `<system>` decode rate (msg/s) | `topic/rates` |
+| `<system>` control channel (MHz) | `topic/rates` |
+| `<system>` active calls | `topic/calls_active` |
+
+The systems with a control channel get the last three; conventional systems have none.
+The entities read what the plugin already publishes, so nothing more is sent
+to the broker, and they show as unavailable while the recorder is. The
+discovery messages are retained and sent again after each reconnect.
+
+Discovery adds entities; it doesn't remove them. If a system is renamed or removed,
+or discovery is turned off, delete the old device in Home Assistant (Settings →
+Devices & services → MQTT) or publish an empty retained message to its
+`<prefix>/<component>/<instance ID>/<object>/config` topic.
 
 ## License
 

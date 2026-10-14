@@ -21,7 +21,13 @@ impl Drop for Broker {
 }
 
 fn mosquitto() -> Option<Broker> {
-    let bin = ["/usr/sbin/mosquitto", "/usr/local/sbin/mosquitto", "/opt/homebrew/sbin/mosquitto"].into_iter().find(|p| std::path::Path::new(p).exists())?;
+    // (MOSQUITTO names one that isn't installed in the usual places.)
+    let named = std::env::var("MOSQUITTO").ok();
+    let bin = named
+        .as_deref()
+        .into_iter()
+        .chain(["/usr/sbin/mosquitto", "/usr/local/sbin/mosquitto", "/opt/homebrew/sbin/mosquitto"])
+        .find(|p| std::path::Path::new(p).exists())?;
     let port = std::net::TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok()?.port();
     // No config file (packaged mosquitto may only read its own): local-only, anonymous.
     let child = Command::new(bin).arg("-p").arg(port.to_string()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
@@ -191,6 +197,67 @@ fn publishes_to_a_broker() {
     // The connected status comes before anything else of ours.
     let first = topics.iter().position(|t| t.starts_with("tr/")).unwrap();
     assert_eq!(topics[first], "tr/feeds/trunk_recorder/status");
+}
+
+/// Home Assistant's discovery is retained at the broker, and says "unavailable" with the recorder.
+#[test]
+fn home_assistant_discovery_is_retained() {
+    let Some(broker) = mosquitto() else {
+        eprintln!("no mosquitto: skipped");
+        return;
+    };
+    let dir = testing::temp_dir("mqtt-ha");
+    let hello =
+        testing::hello(&dir, json!({ "broker": format!("tcp://127.0.0.1:{}", broker.port), "topic": "tr/feeds", "homeAssistant": true, "instanceId": "east" }));
+    let mut plugin = Command::new(env!("CARGO_BIN_EXE_mqtt")).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let mut stdin = plugin.stdin.take().unwrap();
+    stdin.write_all(line(&HostMessage::Hello(hello)).as_bytes()).unwrap();
+    std::thread::sleep(Duration::from_millis(800));
+    stdin.write_all(line(&HostMessage::Shutdown(Shutdown { grace_s: 5.0 })).as_bytes()).unwrap();
+    drop(stdin);
+    assert!(plugin.wait().unwrap().success());
+    // A Home Assistant that starts afterwards still finds every entity.
+    let late = subscribe(broker.port, "homeassistant/#");
+    std::thread::sleep(Duration::from_millis(500));
+    let late = late.lock().unwrap();
+    assert!(late.iter().all(|(_, _, retained)| *retained));
+    let topics: Vec<&str> = late.iter().map(|(t, _, _)| t.as_str()).collect();
+    for t in [
+        "homeassistant/binary_sensor/east/recorder/config",
+        "homeassistant/sensor/east/active_calls/config",
+        "homeassistant/sensor/east/last_call/config",
+        "homeassistant/sensor/east/sys1_decode_rate/config",
+        "homeassistant/sensor/east/sys1_control_channel/config",
+        "homeassistant/sensor/east/sys1_active_calls/config",
+    ] {
+        assert!(topics.contains(&t), "{t} missing from {topics:?}");
+    }
+    let rate = late.iter().find(|(t, _, _)| t.ends_with("sys1_decode_rate/config")).unwrap();
+    assert_eq!(rate.1["state_topic"], "tr/feeds/rates");
+    assert_eq!(rate.1["availability"]["topic"], "tr/feeds/trunk_recorder/status");
+}
+
+/// Off unless asked for: nothing is published under Home Assistant's prefix.
+#[test]
+fn discovery_is_off_by_default() {
+    let Some(broker) = mosquitto() else {
+        eprintln!("no mosquitto: skipped");
+        return;
+    };
+    let got = subscribe(broker.port, "#");
+    std::thread::sleep(Duration::from_millis(300));
+    let dir = testing::temp_dir("mqtt-ha-off");
+    let hello = testing::hello(&dir, json!({ "broker": format!("tcp://127.0.0.1:{}", broker.port), "topic": "tr/feeds" }));
+    let mut plugin = Command::new(env!("CARGO_BIN_EXE_mqtt")).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let mut stdin = plugin.stdin.take().unwrap();
+    stdin.write_all(line(&HostMessage::Hello(hello)).as_bytes()).unwrap();
+    std::thread::sleep(Duration::from_millis(800));
+    stdin.write_all(line(&HostMessage::Shutdown(Shutdown { grace_s: 5.0 })).as_bytes()).unwrap();
+    drop(stdin);
+    assert!(plugin.wait().unwrap().success());
+    std::thread::sleep(Duration::from_millis(200));
+    let got = got.lock().unwrap();
+    assert!(!got.is_empty() && got.iter().all(|(t, _, _)| !t.starts_with("homeassistant")));
 }
 
 #[test]

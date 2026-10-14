@@ -2,6 +2,7 @@
 //! system status to an MQTT broker, in the format of Trunk Recorder's MQTT
 //! Status plugin.
 
+mod homeassistant;
 mod payload;
 mod publisher;
 mod transport;
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use trunk_recorder_plugin::{base64, topic, CallInfo, ConcludedCall, Host, Manifest, NoConfig, Outcome, Plugin, Setup, Status, UnitEvent};
+use trunk_recorder_plugin::{base64, topic, CallInfo, ConcludedCall, Host, Manifest, NoConfig, Outcome, Plugin, Setup, Status, UnitEvent, CONVENTIONAL};
 
 use payload::Directory;
 use publisher::{unix_now, Kind, Limits, Publisher};
@@ -113,6 +114,19 @@ struct Config {
     #[serde(alias = "heartbeat_timeout")]
     #[schemars(range(min = 1, max = 600))]
     heartbeat_timeout: u64,
+    /// Home Assistant discovery
+    ///
+    /// Publishes the entities Home Assistant adds on its own for the recorder:
+    /// its status, active calls, and each system's decode rate, control
+    /// channel and calls, and the last call heard.
+    #[serde(alias = "home_assistant")]
+    home_assistant: bool,
+    /// Discovery prefix
+    ///
+    /// The prefix Home Assistant's MQTT integration listens under. Change it
+    /// only if it was changed there.
+    #[serde(alias = "discovery_prefix")]
+    discovery_prefix: String,
 }
 
 impl Default for Config {
@@ -134,6 +148,8 @@ impl Default for Config {
             queue_max_mb: 32,
             heartbeat_interval: 10,
             heartbeat_timeout: 30,
+            home_assistant: false,
+            discovery_prefix: "homeassistant".into(),
         }
     }
 }
@@ -192,6 +208,10 @@ impl Plugin for Mqtt {
                 return Err(format!("The topic \"{t}\" can't have + or # in it."));
             }
         }
+        let discovery_prefix = clean_topic(&c.discovery_prefix);
+        if c.home_assistant && !transport::valid_topic(&discovery_prefix) {
+            return Err("The discovery prefix can't be empty or have + or # in it.".into());
+        }
         if c.qos > 2 {
             return Err("QoS is 0, 1 or 2.".into());
         }
@@ -230,6 +250,13 @@ impl Plugin for Mqtt {
         let dir = Directory::new(setup.systems.iter().map(|s| (s.index, s.short_name.clone(), s.kind.clone())));
         publisher.send(&topic, Kind::Retained, "systems", "systems", payload::systems(&dir));
         publisher.send(&topic, Kind::Retained, "config", "config", payload::config(&dir, &setup.capture_dir, &instance_id));
+        if c.home_assistant {
+            let controlled: Vec<String> = setup.systems.iter().filter(|s| s.index != CONVENTIONAL).map(|s| s.short_name.clone()).collect();
+            let discovery = homeassistant::Discovery { prefix: &discovery_prefix, topic: &topic, instance_id: &instance_id, systems: &controlled };
+            for (t, v) in discovery.messages() {
+                publisher.send_raw(&t, Kind::Retained, serde_json::to_vec(&v).unwrap_or_default());
+            }
+        }
         let state = Arc::new(Mutex::new(Active { dir, calls: BTreeMap::new() }));
         let stop_ticker = Arc::new(AtomicBool::new(false));
         start_ticker(publisher.clone(), topic.clone(), state.clone(), stop_ticker.clone());
@@ -403,9 +430,13 @@ mod tests {
 
     #[test]
     fn bad_settings_stop_it() {
-        for bad in
-            [json!({ "topic": "" }), json!({ "topic": "a/#" }), json!({ "topic": "t", "broker": "localhost" }), json!({ "topic": "t", "mqttVersion": 4 })]
-        {
+        for bad in [
+            json!({ "topic": "" }),
+            json!({ "topic": "a/#" }),
+            json!({ "topic": "t", "broker": "localhost" }),
+            json!({ "topic": "t", "mqttVersion": 4 }),
+            json!({ "topic": "t", "homeAssistant": true, "discoveryPrefix": "/" }),
+        ] {
             let dir = testing::temp_dir("mqtt");
             let out = testing::run::<Mqtt>([HostMessage::Hello(testing::hello(&dir, bad.clone()))]);
             assert_eq!(out.exit_code, EXIT_CONFIG, "{bad}");
