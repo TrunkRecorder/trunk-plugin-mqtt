@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.5]
 
 - Home Assistant discovery (off by default): the recorder's status, active calls, last call,
   and each system's decode rate, control channel and calls appear in Home Assistant on their own.
