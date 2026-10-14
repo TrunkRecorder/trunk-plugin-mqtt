@@ -61,14 +61,15 @@ struct Config {
     instance_id: String,
     /// QoS
     ///
-    /// 0: at most once, 1: at least once, 2: exactly once.
-    #[schemars(range(min = 0, max = 2))]
+    /// How hard the broker tries to deliver each message.
+    // A list rather than a number to type: the settings form draws it as a menu.
+    #[schemars(extend("enum" = [0, 1, 2], "x-enum-labels" = ["0: at most once", "1: at least once", "2: exactly once"]))]
     qos: u8,
     /// MQTT version
     ///
-    /// 3 (3.1.1) or 5. MQTT 5 needs a broker that supports it.
+    /// MQTT 5 needs a broker that supports it.
     #[serde(alias = "mqtt_version")]
-    #[schemars(range(min = 3, max = 5))]
+    #[schemars(extend("enum" = [3, 5], "x-enum-labels" = ["3.1.1", "5"]))]
     mqtt_version: u8,
     /// Send call audio
     ///
@@ -426,6 +427,14 @@ mod tests {
         assert_eq!((c.unit_topic.as_str(), c.mqtt_audio, c.queue_max_mb, c.heartbeat_timeout), ("tr/units", true, 8, 45));
         assert!(c.mqtt_audio_type == AudioType::Both);
         assert_eq!(c.instance_id, "east");
+    }
+
+    #[test]
+    fn qos_and_version_are_menus() {
+        let schema = serde_json::to_value(schemars::schema_for!(Config)).unwrap();
+        let p = &schema["properties"];
+        assert_eq!((p["qos"]["enum"].clone(), p["mqttVersion"]["enum"].clone()), (json!([0, 1, 2]), json!([3, 5])));
+        assert_eq!(p["mqttVersion"]["x-enum-labels"], json!(["3.1.1", "5"]));
     }
 
     #[test]
