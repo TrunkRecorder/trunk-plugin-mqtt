@@ -3,6 +3,7 @@
     "broker": "tcp://localhost:1883",
     "topic": "trunk-recorder/feeds",
     "unitTopic": "trunk-recorder/units",
-    "mqttAudio": false
+    "mqttAudio": false,
+    "homeAssistant": false
   }
 }

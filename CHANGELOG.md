@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Home Assistant discovery (off by default): the recorder's status, active calls, last call,
+  and each system's decode rate, control channel and calls appear in Home Assistant on their own.
+
 ## [0.1.4]
 
 - Builds against the plugin SDK of Trunk Recorder Pro v0.1.11
