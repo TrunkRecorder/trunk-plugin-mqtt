@@ -4,6 +4,7 @@
 
 - Home Assistant discovery (off by default): the recorder's status, active calls, last call,
   and each system's decode rate, control channel and calls appear in Home Assistant on their own.
+- QoS and MQTT version are chosen from a menu
 
 ## [0.1.4]
 
