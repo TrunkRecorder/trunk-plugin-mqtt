@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use trunk_recorder_plugin::{Host, State};
+use trunk_recorder_plugin::{Endpoint, EndpointState, Host, Metrics, State};
 
 use crate::transport::{self, valid_topic, Client, Net, Settings};
 
@@ -50,6 +50,8 @@ struct Queue {
     bytes: usize,
     dropped_stale: u64,
     dropped_overflow: u64,
+    /// Both, since the start (for the dashboard).
+    dropped_total: u64,
 }
 
 impl Queue {
@@ -76,6 +78,7 @@ impl Queue {
             let old = self.items.pop_front().unwrap();
             self.bytes -= old.payload.len();
             self.dropped_overflow += 1;
+            self.dropped_total += 1;
         }
     }
 
@@ -97,8 +100,29 @@ impl Queue {
         });
         self.bytes -= freed;
         self.dropped_stale += (n - self.items.len()) as u64;
+        self.dropped_total += (n - self.items.len()) as u64;
     }
 }
+
+/// What the connection has done, for the dashboard ([`Metrics`]).
+#[derive(Default)]
+struct Stats {
+    /// A connection has been tried (the broker's state is unknown until then).
+    tried: bool,
+    connected_once: bool,
+    sent: u64,
+    bytes_sent: u64,
+    reconnects: u64,
+    /// Unix s of the last message handed to the connection, and of the last failure.
+    last_ok: Option<f64>,
+    last_error: Option<f64>,
+    last_error_text: String,
+}
+
+/// Metrics go out at most this often while they change, and at least this often regardless;
+/// at once when the broker's state changes.
+const METRICS_MIN: Duration = Duration::from_secs(5);
+const METRICS_MAX: Duration = Duration::from_secs(30);
 
 struct Shared {
     queue: Mutex<Queue>,
@@ -117,6 +141,7 @@ struct Shared {
     client_id: String,
     broker: String,
     host: Host,
+    stats: Mutex<Stats>,
 }
 
 #[derive(Clone)]
@@ -146,6 +171,7 @@ impl Publisher {
             client_id: settings.client_id.clone(),
             broker: settings.broker.url_or_host(),
             host,
+            stats: Mutex::new(Stats::default()),
         });
         let (client, connection) = transport::connect(&settings, &will);
         let net = {
@@ -186,6 +212,10 @@ impl Publisher {
         sh.cv.notify_one();
     }
 
+    pub fn connected(&self) -> bool {
+        self.sh.connected.load(Ordering::Relaxed)
+    }
+
     /// Send what's queued (while connected) within `grace`, then say goodbye and disconnect.
     pub fn shutdown(&self, grace: Duration) {
         let sh = &self.sh;
@@ -221,7 +251,51 @@ pub fn status_payload(status: &str, instance_id: &str, client_id: &str) -> Vec<u
 }
 
 pub fn unix_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+    unix_now_f64() as i64
+}
+
+fn unix_now_f64() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
+// broker_state()
+//   Up while connected; Degraded while connected with a backlog (the broker
+//   is slow to take it); Down while not connected.
+fn broker_state(connected: bool, queued: usize, st: &Stats) -> EndpointState {
+    if !st.tried {
+        EndpointState::Unknown
+    } else if !connected {
+        EndpointState::Down
+    } else if queued > 100 {
+        EndpointState::Degraded
+    } else {
+        EndpointState::Up
+    }
+}
+
+// metrics()
+//   The dashboard's figures: the queue, what's been sent, and the broker.
+fn metrics(sh: &Shared, q: &Queue) -> (Metrics, EndpointState) {
+    let st = sh.stats.lock().unwrap();
+    let connected = sh.connected.load(Ordering::Relaxed);
+    let state = broker_state(connected, q.items.len(), &st);
+    let mut extra = BTreeMap::new();
+    extra.insert("Messages sent".to_string(), json!(st.sent));
+    extra.insert("Dropped".to_string(), json!(q.dropped_total));
+    extra.insert("Reconnects".to_string(), json!(st.reconnects));
+    extra.insert("Queued KB".to_string(), json!(q.bytes / 1024));
+    let last_error = if state == EndpointState::Up { String::new() } else { st.last_error_text.clone() };
+    let m = Metrics {
+        queued: Some(q.items.len() as u64),
+        bytes_sent: Some(st.bytes_sent),
+        last_ok: st.last_ok,
+        last_error: st.last_error,
+        last_error_text: st.last_error_text.clone(),
+        endpoints: vec![Endpoint { name: sh.broker.clone(), state, last_ok: st.last_ok, last_error, ..Default::default() }],
+        extra,
+        ..Default::default()
+    };
+    (m, state)
 }
 
 // net_loop()
@@ -233,6 +307,14 @@ fn net_loop(sh: &Shared, mut conn: transport::Connection) {
     while let Some(ev) = conn.next() {
         let failed = match ev {
             Net::Connected => {
+                {
+                    let mut st = sh.stats.lock().unwrap();
+                    if st.connected_once {
+                        st.reconnects += 1;
+                    }
+                    st.tried = true;
+                    st.connected_once = true;
+                }
                 // Queue the status first, so it's the first thing sent.
                 on_connect(sh);
                 sh.connected.store(true, Ordering::Relaxed);
@@ -251,6 +333,14 @@ fn net_loop(sh: &Shared, mut conn: transport::Connection) {
         };
         let Some(why) = failed else { continue };
         let was = sh.connected.swap(false, Ordering::Relaxed);
+        {
+            let mut st = sh.stats.lock().unwrap();
+            st.tried = true;
+            st.last_error = Some(unix_now_f64());
+            st.last_error_text = why.clone();
+        }
+        // The publish thread reports the change.
+        sh.cv.notify_one();
         if sh.stopping.load(Ordering::Relaxed) {
             sh.host.warn(format!("connection to {} ended while stopping: {why}", sh.broker));
             break;
@@ -304,6 +394,7 @@ fn publish_loop(sh: &Shared, client: Client) {
     let mut next_report = Instant::now() + Duration::from_secs(30);
     let mut next_heartbeat = sh.limits.heartbeat.map(|h| Instant::now() + h);
     let mut stop_by: Option<(Instant, Instant)> = None;
+    let mut reported: Option<(Instant, Metrics, EndpointState)> = None;
     let mut q = sh.queue.lock().unwrap();
     loop {
         let stopping = sh.stopping.load(Ordering::Relaxed);
@@ -342,6 +433,17 @@ fn publish_loop(sh: &Shared, client: Client) {
                 q = sh.queue.lock().unwrap();
             }
         }
+        let (m, state) = metrics(sh, &q);
+        let due = match &reported {
+            None => true,
+            Some((at, last, last_state)) => state != *last_state || at.elapsed() >= METRICS_MAX || (at.elapsed() >= METRICS_MIN && m != *last),
+        };
+        if due {
+            drop(q);
+            sh.host.metrics(&m);
+            reported = Some((now, m, state));
+            q = sh.queue.lock().unwrap();
+        }
         if !sh.connected.load(Ordering::Relaxed) {
             next_heartbeat = sh.limits.heartbeat.map(|h| now + h);
             continue;
@@ -364,6 +466,11 @@ fn publish_loop(sh: &Shared, client: Client) {
         let Some(o) = q.pop() else { continue };
         drop(q);
         if client.try_publish(&o.topic, o.qos, o.retain, o.payload.clone()) {
+            let mut st = sh.stats.lock().unwrap();
+            st.sent += 1;
+            st.bytes_sent += o.payload.len() as u64;
+            st.last_ok = Some(unix_now_f64());
+            drop(st);
             q = sh.queue.lock().unwrap();
             continue;
         }
@@ -373,7 +480,10 @@ fn publish_loop(sh: &Shared, client: Client) {
         q = sh.queue.lock().unwrap();
         q.push(o, sh.limits.max_bytes, true);
     }
+    // The last figures, as it stops.
+    let (m, _) = metrics(sh, &q);
     drop(q);
+    sh.host.metrics(&m);
     if sh.connected.load(Ordering::Relaxed) {
         let bye = status_payload("disconnected", &sh.instance_id, &sh.client_id);
         let deadline = Instant::now() + Duration::from_millis(500);

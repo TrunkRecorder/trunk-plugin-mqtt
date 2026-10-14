@@ -1,6 +1,6 @@
 [package]
 name = "mqtt"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2021"
 description = "Publishes calls, unit activity and system status to an MQTT broker."
 license = "GPL-3.0-or-later"
@@ -9,7 +9,9 @@ authors = ["Taclane"]
 publish = false
 
 [dependencies]
-trunk-recorder-plugin = "0.1.1"
+# The SDK as Trunk Recorder Pro v0.1.11 has it: newer than crates.io's 0.3.0
+# (the cipher on call start and end). Back to crates.io once it's published there.
+trunk-recorder-plugin = { git = "https://github.com/TrunkRecorder/trunk-recorder-pro", tag = "v0.1.11" }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

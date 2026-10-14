@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use trunk_recorder_plugin::{base64, topic, CallInfo, ConcludedCall, Host, Manifest, NoConfig, Plugin, Setup, Status, UnitEvent};
+use trunk_recorder_plugin::{base64, topic, CallInfo, ConcludedCall, Host, Manifest, NoConfig, Outcome, Plugin, Setup, Status, UnitEvent};
 
 use payload::Directory;
 use publisher::{unix_now, Kind, Limits, Publisher};
@@ -250,7 +250,14 @@ impl Plugin for Mqtt {
     }
 
     fn call_end(&mut self, call: CallInfo) {
-        self.state.lock().unwrap().calls.remove(&call.id);
+        let mut st = self.state.lock().unwrap();
+        st.calls.remove(&call.id);
+        // A recorded call is published once its files are written (call_concluded).
+        if !call.recording {
+            let v = payload::ignored_call(&st.dir, &call, now_f64());
+            drop(st);
+            self.publisher.send(&self.topic, Kind::Event, "call", "call_ignored", v);
+        }
     }
 
     fn call_concluded(&mut self, call: ConcludedCall) {
@@ -273,6 +280,14 @@ impl Plugin for Mqtt {
             }
         }
         self.publisher.send(&self.topic, Kind::Event, "call", "call_end", end);
+        // Tell the recorder we're done with the call's files (the audio was read above),
+        // or it keeps them and counts the call as failed after an hour. Ok shows as
+        // "sent" on the dashboard; skipped means it's queued for a broker that's away.
+        if self.publisher.connected() {
+            self.host.call_result(&call.path, Outcome::Ok, "", "");
+        } else {
+            self.host.call_result(&call.path, Outcome::Skipped, "queued: the broker isn't connected", "");
+        }
     }
 
     fn unit(&mut self, event: UnitEvent) {

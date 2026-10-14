@@ -66,6 +66,15 @@ fn line(m: &HostMessage) -> String {
     serde_json::to_string(m).unwrap() + "\n"
 }
 
+/// The broker's state and the bytes sent, from each metrics message the plugin wrote.
+fn broker_states(log: &str) -> Vec<(String, u64)> {
+    log.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["type"] == "metrics")
+        .map(|v| (v["endpoints"][0]["state"].as_str().unwrap_or("").to_string(), v["bytesSent"].as_u64().unwrap_or(0)))
+        .collect()
+}
+
 #[test]
 fn publishes_to_a_broker() {
     let Some(broker) = mosquitto() else {
@@ -106,7 +115,14 @@ fn publishes_to_a_broker() {
     }
     // A second of calls_active with the call in it.
     std::thread::sleep(Duration::from_millis(1500));
-    for m in [HostMessage::CallEnd(start), HostMessage::CallConcluded(testing::call(&dir, "sys1", 101)), HostMessage::Shutdown(Shutdown { grace_s: 5.0 })] {
+    // And a call that wasn't recorded: it only ends.
+    let skipped = CallInfo { id: 6, talkgroup: 202, recording: false, reason: Some("no_recorder".into()), ..start.clone() };
+    for m in [
+        HostMessage::CallEnd(start),
+        HostMessage::CallEnd(skipped),
+        HostMessage::CallConcluded(testing::call(&dir, "sys1", 101)),
+        HostMessage::Shutdown(Shutdown { grace_s: 5.0 }),
+    ] {
         stdin.write_all(line(&m).as_bytes()).unwrap();
     }
     drop(stdin);
@@ -122,6 +138,12 @@ fn publishes_to_a_broker() {
     std::thread::sleep(Duration::from_millis(300));
     let log = log.join().unwrap();
     assert!(!log.contains("\"warn\""), "{log}");
+    // The concluded call was settled (sent, while connected), so the host doesn't hold its files.
+    assert!(log.lines().any(|l| l.contains("\"call.result\"") && l.contains("\"ok\"")), "{log}");
+    // The dashboard heard the broker was up, and what went out.
+    let metrics = broker_states(&log);
+    assert!(metrics.iter().any(|(s, _)| s == "up"), "{log}");
+    assert!(metrics.iter().any(|(_, sent)| *sent > 0), "{log}");
 
     let got = got.lock().unwrap().clone();
     let topics: Vec<&str> = got.iter().map(|(t, _, _)| t.as_str()).collect();
@@ -133,6 +155,7 @@ fn publishes_to_a_broker() {
         "tr/feeds/rates",
         "tr/feeds/audio",
         "tr/feeds/call_end",
+        "tr/feeds/call_ignored",
         "tr/units/sys1/call",
         "tr/units/sys1/join",
         "tr/units/sys1/end",
@@ -146,6 +169,8 @@ fn publishes_to_a_broker() {
     let (systems, _) = find("tr/feeds/systems");
     assert_eq!(systems["instance_id"], "test");
     assert_eq!(systems["systems"][0]["sys_name"], "sys1");
+    let (ignored, _) = find("tr/feeds/call_ignored");
+    assert_eq!((ignored["call"]["talkgroup"].as_u64(), ignored["call"]["reason"].as_str()), (Some(202), Some("no_recorder")));
     let (start, _) = find("tr/feeds/call_start");
     assert_eq!((start["type"].as_str(), start["call"]["talkgroup"].as_u64(), start["call"]["unit"].as_u64()), (Some("call_start"), Some(101), Some(1234)));
     let active = got.iter().filter(|(t, _, _)| t == "tr/feeds/calls_active").map(|(_, v, _)| v["calls"].as_array().map_or(0, |a| a.len())).max();
@@ -183,6 +208,8 @@ fn an_unreachable_broker_doesnt_hold_up_shutdown() {
     let status = plugin.wait().unwrap();
     assert!(status.success());
     assert!(t0.elapsed() < Duration::from_secs(4), "took {:?}", t0.elapsed());
+    let log = std::io::read_to_string(plugin.stdout.take().unwrap()).unwrap();
+    assert_eq!(broker_states(&log).last().map(|(s, _)| s.as_str()), Some("down"), "{log}");
 }
 
 /// A broker that stops answering (SIGSTOP) is noticed by its missed pings and

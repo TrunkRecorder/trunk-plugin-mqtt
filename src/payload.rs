@@ -117,7 +117,8 @@ fn state_type(s: i64) -> &'static str {
 fn mon_state(reason: Option<&str>) -> (i64, &'static str) {
     match reason {
         Some("unknown_tg") => (1, "UNKNOWN_TG"),
-        Some("ignored_tg") => (2, "IGNORED_TG"),
+        // Trunk Recorder Pro says "ignored".
+        Some("ignored" | "ignored_tg") => (2, "IGNORED_TG"),
         Some("no_source") => (3, "NO_SOURCE"),
         Some("no_recorder") => (4, "NO_RECORDER"),
         Some("encrypted") => (5, "ENCRYPTED"),
@@ -170,7 +171,28 @@ pub fn active_call(d: &Directory, c: &CallInfo, now: f64) -> Value {
         "start_time": start,
         "stop_time": 0,
     });
-    extend(extend(head, d.tg_fields(c.system, c.talkgroup, &c.patched_talkgroups)), tail)
+    let mut v = extend(extend(head, d.tg_fields(c.system, c.talkgroup, &c.patched_talkgroups)), tail);
+    cipher(&mut v, c.algid.map(i64::from), c.key_id.map(i64::from), c.decrypted);
+    v
+}
+
+/// The cipher an encrypted call's voice named, once heard, and whether it was decrypted.
+fn cipher(v: &mut Value, algid: Option<i64>, key_id: Option<i64>, decrypted: bool) {
+    if let (Some(a), Some(k)) = (algid, key_id) {
+        v["algid"] = json!(a);
+        v["key_id"] = json!(k);
+    }
+    v["decrypted"] = json!(decrypted);
+}
+
+/// A call that ended without being recorded (`call_ignored`), and why.
+pub fn ignored_call(d: &Directory, c: &CallInfo, now: f64) -> Value {
+    let mut v = active_call(d, c, now);
+    v["call_state"] = json!(-1);
+    v["call_state_type"] = json!(state_type(-1));
+    v["stop_time"] = json!(now.floor() as i64);
+    v["reason"] = json!(c.reason.as_deref().unwrap_or("unspecified"));
+    v
 }
 
 /// The unit that started a call (`unit_topic/<short name>/call`); None without one.
@@ -201,7 +223,7 @@ pub fn call_end(d: &Directory, c: &ConcludedCall, prefer_m4a: bool, now: i64) ->
         (Some(m4a), true) => file_name(m4a),
         _ => file_name(&c.files.wav),
     };
-    json!({
+    let mut v = json!({
         "id": format!("{sys_num}_{}_{}", r.talkgroup, r.start_time),
         "call_num": r.call_num,
         "sys_num": sys_num,
@@ -242,7 +264,17 @@ pub fn call_end(d: &Directory, c: &ConcludedCall, prefer_m4a: bool, now: i64) ->
         "signal": round2(extra_f64(c, "signal")),
         "noise": round2(extra_f64(c, "noise")),
         "call_filename": file,
-    })
+    });
+    // Trunk Recorder Pro's own measurements, when it made them (not in Trunk Recorder's message).
+    for k in ["snr", "clean_voice_pct"] {
+        if let Some(x) = r.extra.get(k).and_then(Value::as_f64) {
+            v[k] = json!(round2(x));
+        }
+    }
+    // The call JSON writes -1 for no cipher heard.
+    let id = |k: &str| r.extra.get(k).and_then(Value::as_i64).filter(|x| *x >= 0);
+    cipher(&mut v, id("algid"), id("key_id"), r.decrypted);
+    v
 }
 
 /// Each transmission of a recorded call (`unit_topic/<short name>/end`).
@@ -263,7 +295,7 @@ pub fn unit_ends(d: &Directory, c: &ConcludedCall) -> Vec<Value> {
             let length = (end - s.pos).max(0.0);
             let error_count: u64 = errors.iter().filter(|(p, _)| *p >= s.pos && (*p < end || i + 1 == n)).map(|(_, e)| e).sum();
             let stop = s.time + length.round() as i64;
-            let head = json!({
+            let mut head = json!({
                 "sys_num": d.sys_num(c.system),
                 "sys_name": r.short_name,
                 "unit": s.src,
@@ -287,6 +319,11 @@ pub fn unit_ends(d: &Directory, c: &ConcludedCall) -> Vec<Value> {
                 "sample_count": (length * 8000.0).round() as u64,
                 "transmission_filename": file_name(&c.files.wav),
             });
+            // Where the radio said it was (GPS), when it did.
+            if let (Some(lat), Some(lon)) = (s.lat, s.lon) {
+                head["lat"] = json!(lat);
+                head["lon"] = json!(lon);
+            }
             head
         })
         .collect()
@@ -303,6 +340,7 @@ pub fn unit_event(d: &Directory, e: &UnitEvent) -> Option<(&'static str, Value)>
         "answer_request" => "ans_req",
         "location" => "location",
         "call_alert" => "call_alert",
+        "emergency_alarm" => "emergency",
         _ => return None,
     };
     let head = json!({ "sys_num": d.sys_num(e.system), "sys_name": e.short_name, "unit": e.unit, "unit_alpha_tag": d.unit_tag(e.system, e.unit) });
@@ -399,9 +437,14 @@ mod tests {
         let mut call = CallRecord { short_name: "west".into(), talkgroup: 9, call_length: 10.0, start_time: 100, stop_time: 110, ..Default::default() };
         call.src_list = vec![
             SrcEntry { src: 1, time: 100, pos: 0.0, tag_ota: "ENG 1".into(), ..Default::default() },
-            SrcEntry { src: 2, time: 104, pos: 4.0, ..Default::default() },
+            SrcEntry { src: 2, time: 104, pos: 4.0, lat: Some(30.0529), lon: Some(-83.17565), ..Default::default() },
         ];
         call.extra.insert("errorList".into(), json!([{ "pos": 0.0, "error_count": 3 }, { "pos": 5.0, "error_count": 4 }, { "pos": 9.5, "error_count": 1 }]));
+        call.extra.insert("snr".into(), json!(18.5));
+        call.extra.insert("clean_voice_pct".into(), Value::Null);
+        // No cipher heard.
+        call.extra.insert("algid".into(), json!(-1));
+        call.extra.insert("key_id".into(), json!(-1));
         let c = ConcludedCall { path: "west/x".into(), system: 1, call, ..Default::default() };
         let ends = unit_ends(&d, &c);
         assert_eq!(ends.len(), 2);
@@ -409,9 +452,47 @@ mod tests {
         assert_eq!((ends[1]["length"].as_f64(), ends[1]["error_count"].as_u64()), (Some(6.0), Some(5)));
         assert_eq!(ends[0]["unit_alpha_tag"], "ENG 1");
         assert_eq!(ends[1]["stop_time"], 110);
+        assert!(ends[0].get("lat").is_none());
+        assert_eq!((ends[1]["lat"].as_f64(), ends[1]["lon"].as_f64()), (Some(30.0529), Some(-83.17565)));
         let end = call_end(&d, &c, false, 200);
         assert_eq!(end["id"], "1_9_100");
         assert_eq!(end["unit_alpha_tag"], "ENG 1");
+        assert_eq!((end["snr"].as_f64(), end["decrypted"].as_bool()), (Some(18.5), Some(false)));
+        assert!(end.get("clean_voice_pct").is_none(), "not measured: left out");
+        assert!(end.get("algid").is_none() && end.get("key_id").is_none(), "no cipher heard: left out");
+        // An encrypted call with its cipher, from the call JSON as the recorder writes it.
+        let call: CallRecord = serde_json::from_value(json!({ "encrypted": 1, "decrypted": 1, "algid": 0x84, "key_id": 4097 })).unwrap();
+        let end = call_end(&d, &ConcludedCall { system: 1, call, ..Default::default() }, false, 200);
+        assert_eq!((end["algid"].as_i64(), end["key_id"].as_i64(), end["decrypted"].as_bool()), (Some(0x84), Some(4097), Some(true)));
+    }
+
+    #[test]
+    fn calls_not_recorded_say_why() {
+        let d = dir();
+        let c = CallInfo {
+            id: 9,
+            system: 0,
+            short_name: "east".into(),
+            talkgroup: 5,
+            encrypted: true,
+            algid: Some(0xAA),
+            key_id: Some(0x1B50),
+            recording: false,
+            reason: Some("encrypted".into()),
+            start_time: 100.0,
+            ..Default::default()
+        };
+        let v = ignored_call(&d, &c, 108.5);
+        assert_eq!(
+            (v["reason"].as_str(), v["mon_state_type"].as_str(), v["call_state_type"].as_str()),
+            (Some("encrypted"), Some("ENCRYPTED"), Some("COMPLETED"))
+        );
+        assert_eq!((v["stop_time"].as_i64(), v["length"].as_f64()), (Some(108), Some(8.5)));
+        assert_eq!((v["algid"].as_i64(), v["key_id"].as_i64(), v["decrypted"].as_bool()), (Some(0xAA), Some(0x1B50), Some(false)));
+        let c = CallInfo { reason: Some("ignored".into()), encrypted: false, algid: None, key_id: None, ..c };
+        let v = ignored_call(&d, &c, 101.0);
+        assert_eq!((v["reason"].as_str(), v["mon_state_type"].as_str()), (Some("ignored"), Some("IGNORED_TG")));
+        assert!(v.get("algid").is_none());
     }
 
     #[test]
@@ -428,6 +509,9 @@ mod tests {
         let e = UnitEvent { kind: "call_alert".into(), unit: 3, talkgroup: Some(77), ..e };
         let (sub, v) = unit_event(&d, &e).unwrap();
         assert_eq!((sub, v["target_unit"].as_u64(), v["target_unit_alpha_tag"].as_str()), ("call_alert", Some(77), Some("Medic 7")));
+        let e = UnitEvent { kind: "emergency_alarm".into(), unit: 77, talkgroup: Some(5), ..e };
+        let (sub, v) = unit_event(&d, &e).unwrap();
+        assert_eq!((sub, v["unit_alpha_tag"].as_str(), v["talkgroup_alpha_tag"].as_str()), ("emergency", Some("Medic 7"), Some("Fire Disp")));
         assert!(unit_event(&d, &UnitEvent { kind: "something_new".into(), ..Default::default() }).is_none());
     }
 
