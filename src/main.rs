@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use trunk_recorder_plugin::{base64, topic, CallInfo, ConcludedCall, Host, Manifest, NoConfig, Outcome, Plugin, Setup, Status, UnitEvent, CONVENTIONAL};
+use trunk_recorder_plugin::{base64, topic, CallInfo, ConcludedCall, Host, Manifest, Outcome, Plugin, Setup, Status, UnitEvent, CONVENTIONAL};
 
 use payload::Directory;
 use publisher::{unix_now, Kind, Limits, Publisher};
@@ -155,6 +155,17 @@ impl Default for Config {
     }
 }
 
+#[derive(Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", default)]
+struct SystemConfig {
+    /// P25 System ID (hexadecimal, for example 2D1)
+    sysid: String,
+    /// P25 WACN (hexadecimal, for example BEE00)
+    wacn: String,
+    /// P25 NAC (hexadecimal, for example 2D0)
+    nac: String,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum AudioType {
@@ -186,7 +197,7 @@ struct Mqtt {
 
 impl Plugin for Mqtt {
     type Config = Config;
-    type SystemConfig = NoConfig;
+    type SystemConfig = SystemConfig;
 
     fn manifest() -> Manifest {
         Manifest {
@@ -196,7 +207,7 @@ impl Plugin for Mqtt {
         }
     }
 
-    fn start(host: Host, setup: Setup<Config, NoConfig>) -> Result<Self, String> {
+    fn start(host: Host, setup: Setup<Config, SystemConfig>) -> Result<Self, String> {
         let c = setup.config;
         let broker = Broker::parse(&c.broker)?;
         let topic = clean_topic(&c.topic);
@@ -248,7 +259,17 @@ impl Plugin for Mqtt {
         ));
         let publisher = Publisher::start(settings, limits, c.qos, &topic, &instance_id, host.clone());
 
-        let dir = Directory::new(setup.systems.iter().map(|s| (s.index, s.short_name.clone(), s.kind.clone())));
+        let dir = Directory::new(setup.systems.iter().map(|s| {
+            let ids = s.config.as_ref();
+            (
+                s.index,
+                s.short_name.clone(),
+                s.kind.clone(),
+                ids.map_or("", |c| c.sysid.trim()).to_uppercase(),
+                ids.map_or("", |c| c.wacn.trim()).to_uppercase(),
+                ids.map_or("", |c| c.nac.trim()).to_uppercase(),
+            )
+        }));
         publisher.send(&topic, Kind::Retained, "systems", "systems", payload::systems(&dir));
         publisher.send(&topic, Kind::Retained, "config", "config", payload::config(&dir, &setup.capture_dir, &instance_id));
         if c.home_assistant {
