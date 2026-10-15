@@ -19,16 +19,16 @@ struct Talkgroup {
 /// The systems, and the talkgroup and radio names seen so far.
 #[derive(Default)]
 pub struct Directory {
-    /// (index, short name, kind); a system's `sys_num` is its position.
-    systems: Vec<(u16, String, String)>,
+    /// (index, short name, kind, sysid, wacn, nac); `sys_num` is its position.
+    systems: Vec<(u16, String, String, String, String, String)>,
     talkgroups: HashMap<(u16, u32), Talkgroup>,
     units: HashMap<(u16, u32), String>,
     ota_units: HashMap<(u16, u32), String>,
 }
 
 impl Directory {
-    /// `systems`: (index, short name, kind), in the recorder's order.
-    pub fn new(systems: impl IntoIterator<Item = (u16, String, String)>) -> Directory {
+    /// `systems`: (index, short name, kind, sysid, wacn, nac), in recorder order.
+    pub fn new(systems: impl IntoIterator<Item = (u16, String, String, String, String, String)>) -> Directory {
         Directory { systems: systems.into_iter().collect(), ..Default::default() }
     }
 
@@ -392,14 +392,14 @@ pub fn systems(d: &Directory) -> Value {
         d.systems
             .iter()
             .enumerate()
-            .map(|(i, (_, name, kind))| json!({ "sys_num": i, "sys_name": name, "type": kind, "sysid": "", "wacn": "", "nac": "", "rfss": 0, "site_id": 0 }))
+            .map(|(i, (_, name, kind, sysid, wacn, nac))| json!({ "sys_num": i, "sys_name": name, "type": kind, "sysid": sysid, "wacn": wacn, "nac": nac, "rfss": 0, "site_id": 0 }))
             .collect(),
     )
 }
 
 /// What the recorder is set up with (`config`, retained).
 pub fn config(d: &Directory, capture_dir: &Path, instance_id: &str) -> Value {
-    let systems: Vec<Value> = d.systems.iter().enumerate().map(|(i, (_, name, kind))| json!({ "sys_num": i, "sys_name": name, "system_type": kind })).collect();
+    let systems: Vec<Value> = d.systems.iter().enumerate().map(|(i, (_, name, kind, ..))| json!({ "sys_num": i, "sys_name": name, "system_type": kind })).collect();
     json!({ "systems": systems, "capture_dir": capture_dir.display().to_string(), "instance_id": instance_id })
 }
 
@@ -410,9 +410,18 @@ mod tests {
 
     fn dir() -> Directory {
         Directory {
-            systems: vec![(0, "east".into(), "p25".into()), (1, "west".into(), "p25".into()), (CONVENTIONAL, "conv".into(), "conventional".into())],
+            systems: vec![(0, "east".into(), "p25".into(), "2D1".into(), "BEE00".into(), "2D0".into()), (1, "west".into(), "p25".into(), String::new(), String::new(), String::new()), (CONVENTIONAL, "conv".into(), "conventional".into(), String::new(), String::new(), String::new())],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn systems_include_configured_p25_identifiers() {
+        let v = systems(&dir());
+        assert_eq!(v[0]["sysid"], "2D1");
+        assert_eq!(v[0]["wacn"], "BEE00");
+        assert_eq!(v[0]["nac"], "2D0");
+        assert_eq!(v[1]["nac"], "");
     }
 
     #[test]
