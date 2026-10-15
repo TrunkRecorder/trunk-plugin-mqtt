@@ -1,6 +1,6 @@
 [package]
 name = "mqtt"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "Publishes calls, unit activity and system status to an MQTT broker."
 license = "GPL-3.0-or-later"

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.6]
+
+- Publish raw over-the-air unit aliases as `unit_alpha_tag_ota` alongside the
+  resolved `unit_alpha_tag` in call and unit MQTT messages.
+
 ## [0.1.5]
 
 - Home Assistant discovery (off by default): the recorder's status, active calls, last call,
