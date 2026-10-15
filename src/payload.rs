@@ -23,6 +23,7 @@ pub struct Directory {
     systems: Vec<(u16, String, String)>,
     talkgroups: HashMap<(u16, u32), Talkgroup>,
     units: HashMap<(u16, u32), String>,
+    ota_units: HashMap<(u16, u32), String>,
 }
 
 impl Directory {
@@ -61,11 +62,18 @@ impl Directory {
             if !name.is_empty() && s.src > 0 {
                 self.units.insert((c.system, s.src as u32), name.clone());
             }
+            if !s.tag_ota.is_empty() && s.src > 0 {
+                self.ota_units.insert((c.system, s.src as u32), s.tag_ota.clone());
+            }
         }
     }
 
     fn unit_tag(&self, system: u16, unit: u32) -> &str {
         self.units.get(&(system, unit)).map_or("", |s| s.as_str())
+    }
+
+    fn unit_tag_ota(&self, system: u16, unit: u32) -> &str {
+        self.ota_units.get(&(system, unit)).map_or("", |s| s.as_str())
     }
 
     fn tg_fields(&self, system: u16, talkgroup: u32, patches: &[u32]) -> Value {
@@ -149,6 +157,7 @@ pub fn active_call(d: &Directory, c: &CallInfo, now: f64) -> Value {
         "freq": c.freq_hz as f64,
         "unit": unit,
         "unit_alpha_tag": d.unit_tag(c.system, unit),
+        "unit_alpha_tag_ota": d.unit_tag_ota(c.system, unit),
     });
     let tail = json!({
         "elapsed": (now - c.start_time).max(0.0).round() as i64,
@@ -198,7 +207,7 @@ pub fn ignored_call(d: &Directory, c: &CallInfo, now: f64) -> Value {
 /// The unit that started a call (`unit_topic/<short name>/call`); None without one.
 pub fn unit_call(d: &Directory, c: &CallInfo) -> Option<Value> {
     let unit = *c.units.first()?;
-    let head = json!({ "sys_num": d.sys_num(c.system), "sys_name": c.short_name, "unit": unit, "unit_alpha_tag": d.unit_tag(c.system, unit) });
+    let head = json!({ "sys_num": d.sys_num(c.system), "sys_name": c.short_name, "unit": unit, "unit_alpha_tag": d.unit_tag(c.system, unit), "unit_alpha_tag_ota": d.unit_tag_ota(c.system, unit) });
     let tail = json!({ "call_num": c.id, "freq": c.freq_hz as f64, "encrypted": c.encrypted, "start_time": c.start_time.floor() as i64 });
     Some(extend(extend(head, d.tg_fields(c.system, c.talkgroup, &c.patched_talkgroups)), tail))
 }
@@ -218,6 +227,7 @@ pub fn call_end(d: &Directory, c: &ConcludedCall, prefer_m4a: bool, now: i64) ->
     let first = r.src_list.first();
     let unit = first.map_or(0, |s| s.src);
     let unit_tag = first.map_or(String::new(), |s| if s.tag.is_empty() { s.tag_ota.clone() } else { s.tag.clone() });
+    let unit_tag_ota = first.map_or("", |s| s.tag_ota.as_str());
     let sys_num = d.sys_num(c.system);
     let file = match (&c.files.m4a, prefer_m4a) {
         (Some(m4a), true) => file_name(m4a),
@@ -231,6 +241,7 @@ pub fn call_end(d: &Directory, c: &ConcludedCall, prefer_m4a: bool, now: i64) ->
         "freq": r.freq as f64,
         "unit": unit,
         "unit_alpha_tag": unit_tag,
+        "unit_alpha_tag_ota": unit_tag_ota,
         "talkgroup": r.talkgroup,
         "talkgroup_alpha_tag": r.talkgroup_tag,
         "talkgroup_description": r.talkgroup_description,
@@ -300,6 +311,7 @@ pub fn unit_ends(d: &Directory, c: &ConcludedCall) -> Vec<Value> {
                 "sys_name": r.short_name,
                 "unit": s.src,
                 "unit_alpha_tag": if s.tag.is_empty() { &s.tag_ota } else { &s.tag },
+                "unit_alpha_tag_ota": s.tag_ota,
                 "talkgroup": r.talkgroup,
                 "talkgroup_alpha_tag": r.talkgroup_tag,
                 "talkgroup_description": r.talkgroup_description,
@@ -343,7 +355,7 @@ pub fn unit_event(d: &Directory, e: &UnitEvent) -> Option<(&'static str, Value)>
         "emergency_alarm" => "emergency",
         _ => return None,
     };
-    let head = json!({ "sys_num": d.sys_num(e.system), "sys_name": e.short_name, "unit": e.unit, "unit_alpha_tag": d.unit_tag(e.system, e.unit) });
+    let head = json!({ "sys_num": d.sys_num(e.system), "sys_name": e.short_name, "unit": e.unit, "unit_alpha_tag": d.unit_tag(e.system, e.unit), "unit_alpha_tag_ota": d.unit_tag_ota(e.system, e.unit) });
     let body = match (sub, e.talkgroup) {
         ("call_alert", target) => {
             let target = target.unwrap_or(0);
@@ -428,7 +440,7 @@ mod tests {
         assert_eq!(v["elapsed"], 3);
         assert_eq!(v["conventional"], true);
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
-        assert_eq!(&keys[..9], ["id", "call_num", "sys_num", "sys_name", "freq", "unit", "unit_alpha_tag", "talkgroup", "talkgroup_alpha_tag"]);
+        assert_eq!(&keys[..10], ["id", "call_num", "sys_num", "sys_name", "freq", "unit", "unit_alpha_tag", "unit_alpha_tag_ota", "talkgroup", "talkgroup_alpha_tag"]);
     }
 
     #[test]
@@ -451,12 +463,14 @@ mod tests {
         assert_eq!((ends[0]["length"].as_f64(), ends[0]["error_count"].as_u64()), (Some(4.0), Some(3)));
         assert_eq!((ends[1]["length"].as_f64(), ends[1]["error_count"].as_u64()), (Some(6.0), Some(5)));
         assert_eq!(ends[0]["unit_alpha_tag"], "ENG 1");
+        assert_eq!(ends[0]["unit_alpha_tag_ota"], "ENG 1");
         assert_eq!(ends[1]["stop_time"], 110);
         assert!(ends[0].get("lat").is_none());
         assert_eq!((ends[1]["lat"].as_f64(), ends[1]["lon"].as_f64()), (Some(30.0529), Some(-83.17565)));
         let end = call_end(&d, &c, false, 200);
         assert_eq!(end["id"], "1_9_100");
         assert_eq!(end["unit_alpha_tag"], "ENG 1");
+        assert_eq!(end["unit_alpha_tag_ota"], "ENG 1");
         assert_eq!((end["snr"].as_f64(), end["decrypted"].as_bool()), (Some(18.5), Some(false)));
         assert!(end.get("clean_voice_pct").is_none(), "not measured: left out");
         assert!(end.get("algid").is_none() && end.get("key_id").is_none(), "no cipher heard: left out");
@@ -513,6 +527,25 @@ mod tests {
         let (sub, v) = unit_event(&d, &e).unwrap();
         assert_eq!((sub, v["unit_alpha_tag"].as_str(), v["talkgroup_alpha_tag"].as_str()), ("emergency", Some("Medic 7"), Some("Fire Disp")));
         assert!(unit_event(&d, &UnitEvent { kind: "something_new".into(), ..Default::default() }).is_none());
+    }
+
+    #[test]
+    fn ota_alias_is_separate_and_survives_a_missing_observation() {
+        let mut d = dir();
+        let mut call = CallRecord::default();
+        call.src_list = vec![SrcEntry { src: 77, tag: "Medic 7".into(), tag_ota: "M7 OTA".into(), ..Default::default() }];
+        d.learn_concluded(&ConcludedCall { system: 0, call, ..Default::default() });
+
+        let event = UnitEvent { system: 0, short_name: "east".into(), kind: "registration".into(), unit: 77, ..Default::default() };
+        let (_, v) = unit_event(&d, &event).unwrap();
+        assert_eq!(v["unit_alpha_tag"], "Medic 7");
+        assert_eq!(v["unit_alpha_tag_ota"], "M7 OTA");
+
+        let mut call = CallRecord::default();
+        call.src_list = vec![SrcEntry { src: 77, tag: "Medic 7".into(), ..Default::default() }];
+        d.learn_concluded(&ConcludedCall { system: 0, call, ..Default::default() });
+        let (_, v) = unit_event(&d, &event).unwrap();
+        assert_eq!(v["unit_alpha_tag_ota"], "M7 OTA");
     }
 
     #[test]
