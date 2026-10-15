@@ -107,7 +107,10 @@ Trunk Recorder Pro doesn't report everything Trunk Recorder does. These are not 
 
 - `recorders`, `recorder` and `system`
 - `console` (log messages) and the trunking message topic
-- In `systems`: `sysid`, `wacn`, `nac`, `rfss` and `site_id` are empty
+- In `systems`: `rfss` and `site_id` are zero. Enter each P25 system's `sysid`,
+  `wacn` and `nac` in that system's MQTT plugin settings to publish them in the
+  retained `systems` message. Trunk Recorder Pro's plugin API does not provide
+  those values automatically; unset fields remain empty.
 - In active-call messages (`call_start`, `calls_active`): `rec_num`, `src_num` and `rec_state` are `-1`
 - `config` lists systems only, without sources
 
