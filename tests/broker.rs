@@ -114,7 +114,18 @@ fn publishes_to_a_broker() {
     let unit = UnitEvent { system: 0, short_name: "sys1".into(), kind: "affiliation".into(), unit: 1234, talkgroup: Some(101), time: now };
     let status = Status {
         time: now,
-        systems: vec![SystemStatus { index: 0, short_name: "sys1".into(), control_channel_hz: Some(851_000_000), decode_rate: 40.0, ..Default::default() }],
+        systems: vec![SystemStatus {
+            index: 0,
+            short_name: "sys1".into(),
+            control_channel_hz: Some(851_000_000),
+            decode_rate: 40.0,
+            nac: Some(0xBCC),
+            wacn: Some(0xBBBBB),
+            sys_id: Some(0x555),
+            rfss: Some(1),
+            site: Some(7),
+            ..Default::default()
+        }],
     };
     for m in [HostMessage::Hello(hello), HostMessage::CallStart(start.clone()), HostMessage::Unit(unit), HostMessage::Status(status)] {
         stdin.write_all(line(&m).as_bytes()).unwrap();
@@ -162,6 +173,7 @@ fn publishes_to_a_broker() {
         "tr/feeds/audio",
         "tr/feeds/call_end",
         "tr/feeds/call_ignored",
+        "tr/feeds/system",
         "tr/units/sys1/call",
         "tr/units/sys1/join",
         "tr/units/sys1/end",
@@ -193,6 +205,11 @@ fn publishes_to_a_broker() {
         assert!(retained.contains(&t), "{t} not retained: {retained:?}");
     }
     let last = late.iter().find(|(t, _, _)| t == "tr/feeds/trunk_recorder/status").unwrap();
+    // The system's identity, once its control channel stated it: on its own, and in the retained list.
+    let (system, _) = find("tr/feeds/system");
+    assert_eq!((system["system"]["sysid"].as_str(), system["system"]["site_id"].as_u64()), (Some("555"), Some(7)));
+    let systems = late.iter().find(|(t, _, _)| t == "tr/feeds/systems").unwrap();
+    assert_eq!((systems.1["systems"][0]["wacn"].as_str(), systems.1["systems"][0]["nac"].as_str()), (Some("BBBBB"), Some("BCC")));
     assert_eq!(last.1["status"], "disconnected");
     // The connected status comes before anything else of ours.
     let first = topics.iter().position(|t| t.starts_with("tr/")).unwrap();

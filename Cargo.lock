@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "rumqttc",
  "rustls",
@@ -905,7 +905,7 @@ dependencies = [
 [[package]]
 name = "trunk-recorder-plugin"
 version = "0.3.0"
-source = "git+https://github.com/TrunkRecorder/trunk-recorder-pro?tag=v0.1.11#385a43a70d1a68e443afc741d12d8838ab82f438"
+source = "git+https://github.com/TrunkRecorder/trunk-recorder-pro?tag=v0.1.12#7fc8737a6d2df31cb1825b0635bb3b0cdf9b7195"
 dependencies = [
  "schemars",
  "serde",

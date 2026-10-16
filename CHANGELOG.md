@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.6]
+
+- `systems` carries each system's ID, WACN, NAC, RFSS and site once its control channel has
+  stated them, and is sent again whenever they change; `system` is sent for the system that
+  changed. Needs Trunk Recorder Pro v0.1.12 or newer.
+
 ## [0.1.5]
 
 - Home Assistant discovery (off by default): the recorder's status, active calls, last call,

@@ -65,7 +65,8 @@ Every message is JSON: `{"type": <subtopic>, <name>: <data>, "timestamp": <unix 
 | Topic | Subtopic | Retained | Description |
 | ----- | -------- | :------: | ----------- |
 | topic | `config` | ✓ | Systems, capture folder, instance ID |
-| topic | `systems` | ✓ | Configured systems |
+| topic | `systems` | ✓ | Configured systems, sent again whenever a system's identity changes |
+| topic | `system` | | One system, when its identity (system ID, WACN, NAC, RFSS, site) is learned or changes |
 | topic | `rates` | | Control channel decode rates, every 5 seconds |
 | topic | `calls_active` | | Active calls, every second |
 | topic | `call_start` | | A call started |
@@ -96,6 +97,8 @@ Trunk Recorder Pro reports some things Trunk Recorder doesn't, and these are add
 - `call_ignored`: a call that wasn't recorded, with its `reason` (`encrypted`, `unknown_tg`,
   `ignored`, `no_recorder`, `no_source`)
 - `emergency`: a radio's emergency alarm, with its talkgroup
+- `systems` is sent again whenever a system's identity changes, not only at the start, so its
+  retained copy has the system ID, WACN, NAC, RFSS and site
 - In `call_end`: `snr` and `clean_voice_pct`, when measured
 - In call messages: `decrypted`, and `algid` and `key_id` once the call's voice has named its
   cipher (`132` is AES-256)
@@ -105,9 +108,8 @@ Trunk Recorder Pro reports some things Trunk Recorder doesn't, and these are add
 
 Trunk Recorder Pro doesn't report everything Trunk Recorder does. These are not published:
 
-- `recorders`, `recorder` and `system`
+- `recorders` and `recorder`
 - `console` (log messages) and the trunking message topic
-- In `systems`: `sysid`, `wacn`, `nac`, `rfss` and `site_id` are empty
 - In active-call messages (`call_start`, `calls_active`): `rec_num`, `src_num` and `rec_state` are `-1`
 - `config` lists systems only, without sources
 

@@ -329,8 +329,19 @@ impl Plugin for Mqtt {
     fn status(&mut self, status: Status) {
         let interval = self.last_status.map_or(0.0, |t| t.elapsed().as_secs_f64());
         self.last_status = Some(Instant::now());
-        let st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap();
         self.publisher.send(&self.topic, Kind::Snapshot, "rates", "rates", payload::rates(&st.dir, &status, interval));
+        // A system's identity, as its control channel states it, as Trunk Recorder
+        // sends it: the whole list again (retained), then the system that changed.
+        let changed = st.dir.learn_identity(&status);
+        if !changed.is_empty() {
+            self.publisher.send(&self.topic, Kind::Retained, "systems", "systems", payload::systems(&st.dir));
+            for index in changed {
+                if let Some(v) = payload::system(&st.dir, index) {
+                    self.publisher.send(&self.topic, Kind::Event, "system", "system", v);
+                }
+            }
+        }
     }
 
     fn shutdown(&mut self, grace: Duration) {
