@@ -16,11 +16,22 @@ struct Talkgroup {
     tag: String,
 }
 
+/// A system's identity, as far as its control channel has stated it.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Identity {
+    nac: Option<u32>,
+    wacn: Option<u32>,
+    sys_id: Option<u32>,
+    rfss: Option<u32>,
+    site: Option<u32>,
+}
+
 /// The systems, and the talkgroup and radio names seen so far.
 #[derive(Default)]
 pub struct Directory {
     /// (index, short name, kind); a system's `sys_num` is its position.
     systems: Vec<(u16, String, String)>,
+    identity: HashMap<u16, Identity>,
     talkgroups: HashMap<(u16, u32), Talkgroup>,
     units: HashMap<(u16, u32), String>,
 }
@@ -33,6 +44,27 @@ impl Directory {
 
     pub fn sys_num(&self, index: u16) -> usize {
         self.systems.iter().position(|s| s.0 == index).unwrap_or(index as usize)
+    }
+
+    /// Learn each system's identity from a status; the systems whose identity changed.
+    /// What's known is kept: a value the status leaves out isn't forgotten.
+    pub fn learn_identity(&mut self, s: &Status) -> Vec<u16> {
+        let mut changed = Vec::new();
+        for y in &s.systems {
+            let id = self.identity.entry(y.index).or_default();
+            let new = Identity {
+                nac: y.nac.or(id.nac),
+                wacn: y.wacn.or(id.wacn),
+                sys_id: y.sys_id.or(id.sys_id),
+                rfss: y.rfss.or(id.rfss),
+                site: y.site.or(id.site),
+            };
+            if new != *id {
+                *id = new;
+                changed.push(y.index);
+            }
+        }
+        changed
     }
 
     /// Learn names from a call that started.
@@ -376,13 +408,30 @@ pub fn rates(d: &Directory, s: &Status, interval: f64) -> Value {
 
 /// The systems (`systems`, retained).
 pub fn systems(d: &Directory) -> Value {
-    Value::Array(
-        d.systems
-            .iter()
-            .enumerate()
-            .map(|(i, (_, name, kind))| json!({ "sys_num": i, "sys_name": name, "type": kind, "sysid": "", "wacn": "", "nac": "", "rfss": 0, "site_id": 0 }))
-            .collect(),
-    )
+    Value::Array((0..d.systems.len()).map(|i| system_at(d, i)).collect())
+}
+
+/// One system (`system`), as in `systems`; None for one the recorder didn't name at the start.
+pub fn system(d: &Directory, index: u16) -> Option<Value> {
+    Some(system_at(d, d.systems.iter().position(|s| s.0 == index)?))
+}
+
+/// The system at `sys_num` `i`, with its identity as Trunk Recorder writes it:
+/// hex for the IDs, and 0 for what isn't known yet.
+fn system_at(d: &Directory, i: usize) -> Value {
+    let (index, name, kind) = &d.systems[i];
+    let id = d.identity.get(index).copied().unwrap_or_default();
+    let hex = |v: Option<u32>| format!("{:X}", v.unwrap_or(0));
+    json!({
+        "sys_num": i,
+        "sys_name": name,
+        "type": kind,
+        "sysid": hex(id.sys_id),
+        "wacn": hex(id.wacn),
+        "nac": hex(id.nac),
+        "rfss": id.rfss.unwrap_or(0),
+        "site_id": id.site.unwrap_or(0),
+    })
 }
 
 /// What the recorder is set up with (`config`, retained).
@@ -528,5 +577,28 @@ mod tests {
         let v = rates(&d, &s, 5.0);
         assert_eq!(v.as_array().unwrap().len(), 1);
         assert_eq!((v[0]["sys_num"].as_u64(), v[0]["decoderate"].as_f64()), (Some(1), Some(38.46)));
+    }
+
+    #[test]
+    fn systems_take_their_identity_as_it_is_stated() {
+        let mut d = dir();
+        let status = |y: SystemStatus| Status { time: 0.0, systems: vec![y] };
+        let west = SystemStatus { index: 1, short_name: "west".into(), ..Default::default() };
+        // Nothing stated yet: zeros, as Trunk Recorder sends them, and nothing changed.
+        assert!(d.learn_identity(&status(west.clone())).is_empty());
+        let v = systems(&d);
+        assert_eq!((v[1]["sysid"].as_str(), v[1]["wacn"].as_str(), v[1]["nac"].as_str(), v[1]["rfss"].as_u64()), (Some("0"), Some("0"), Some("0"), Some(0)));
+        // The control channel names the system, then the site.
+        let named = SystemStatus { nac: Some(0xBCC), wacn: Some(0xBBBBB), sys_id: Some(0x555), ..west.clone() };
+        assert_eq!(d.learn_identity(&status(named)), [1]);
+        let sited = SystemStatus { rfss: Some(1), site: Some(7), ..west.clone() };
+        assert_eq!(d.learn_identity(&status(sited)), [1]);
+        let v = system(&d, 1).unwrap();
+        assert_eq!(v, json!({ "sys_num": 1, "sys_name": "west", "type": "p25", "sysid": "555", "wacn": "BBBBB", "nac": "BCC", "rfss": 1, "site_id": 7 }));
+        assert_eq!(systems(&d)[1], v);
+        // The same again, or a status that leaves it out: no change, and nothing forgotten.
+        assert!(d.learn_identity(&status(west)).is_empty());
+        assert_eq!(system(&d, 1).unwrap()["site_id"], 7);
+        assert!(system(&d, 9).is_none());
     }
 }

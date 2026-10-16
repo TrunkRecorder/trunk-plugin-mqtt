@@ -4,6 +4,63 @@ Messages in the Trunk Recorder plugin's format are as in its
 [example messages](https://github.com/TrunkRecorder/tr-plugin-mqtt/blob/main/example_messages.md).
 These are the ones that differ: the messages and fields only Trunk Recorder Pro has.
 
+## systems, system
+
+`topic/systems` (retained) and `topic/system`, in Trunk Recorder's format: `sysid`, `wacn`
+and `nac` in hex, `rfss` and `site_id` as numbers, and `"0"` / `0` until the control channel
+has stated them. Trunk Recorder sends `systems` once, at the start, so its retained copy
+usually stays at zeros. Here it's sent again whenever a system's identity is learned or
+changes, followed by a `system` message for that system. (This needs Trunk Recorder Pro
+v0.1.12 or newer; with an older one they stay at zeros.)
+
+```json
+{
+  "type": "systems",
+  "systems": [
+    {
+      "sys_num": 0,
+      "sys_name": "clmrn-I",
+      "type": "p25",
+      "sysid": "3A9",
+      "wacn": "BEE00",
+      "nac": "3A0",
+      "rfss": 3,
+      "site_id": 14
+    },
+    {
+      "sys_num": 1,
+      "sys_name": "clmrn-G",
+      "type": "p25",
+      "sysid": "3A9",
+      "wacn": "BEE00",
+      "nac": "3A0",
+      "rfss": 3,
+      "site_id": 13
+    }
+  ],
+  "timestamp": 1792070430,
+  "instance_id": "trunk-recorder"
+}
+```
+
+```json
+{
+  "type": "system",
+  "system": {
+    "sys_num": 1,
+    "sys_name": "clmrn-G",
+    "type": "p25",
+    "sysid": "3A9",
+    "wacn": "BEE00",
+    "nac": "3A0",
+    "rfss": 3,
+    "site_id": 13
+  },
+  "timestamp": 1792070430,
+  "instance_id": "trunk-recorder"
+}
+```
+
 ## call_end
 
 `topic/call_end`. Trunk Recorder's fields, then `snr` and `clean_voice_pct` (left out when
