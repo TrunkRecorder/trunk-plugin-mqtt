@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.7]
+
+- Built with trunk-recorder-plugin 0.5.0 from crates.io, for Trunk Recorder Pro v0.2.0. A
+  conventional system is told by its kind (systems are numbered from 0 there, conventional ones
+  too). `freq_error`, `signal`, `noise`, `snr`, `clean_voice_pct`, `rec_num`, `src_num`, the cipher
+  and each transmission's errors are read from the call record's named fields: on v0.2.0 they
+  are no longer in its extra fields, where they would have read as 0 or -1.
+
 ## [0.1.6]
 
 - `systems` carries each system's ID, WACN, NAC, RFSS and site once its control channel has

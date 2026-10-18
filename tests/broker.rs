@@ -111,7 +111,7 @@ fn publishes_to_a_broker() {
         units: vec![1234],
         ..Default::default()
     };
-    let unit = UnitEvent { system: 0, short_name: "sys1".into(), kind: "affiliation".into(), unit: 1234, talkgroup: Some(101), time: now };
+    let unit = UnitEvent { system: 0, short_name: "sys1".into(), kind: "affiliation".into(), unit: 1234, talkgroup: Some(101), time: now, ..Default::default() };
     let status = Status {
         time: now,
         systems: vec![SystemStatus {
