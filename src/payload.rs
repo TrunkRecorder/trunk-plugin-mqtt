@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{json, Value};
-use trunk_recorder_plugin::{CallInfo, ConcludedCall, Status, UnitEvent, CONVENTIONAL};
+use trunk_recorder_plugin::{CallInfo, ConcludedCall, Status, UnitEvent};
 
 #[derive(Clone, Default)]
 struct Talkgroup {
@@ -40,6 +40,12 @@ impl Directory {
     /// `systems`: (index, short name, kind), in the recorder's order.
     pub fn new(systems: impl IntoIterator<Item = (u16, String, String)>) -> Directory {
         Directory { systems: systems.into_iter().collect(), ..Default::default() }
+    }
+
+    /// Whether system `index` is conventional (by its kind: recorders since
+    /// v0.1.16 number every system from 0, conventional ones too).
+    pub fn conventional(&self, index: u16) -> bool {
+        self.systems.iter().any(|s| s.0 == index && s.2 == "conventional")
     }
 
     pub fn sys_num(&self, index: u16) -> usize {
@@ -197,7 +203,7 @@ pub fn active_call(d: &Directory, c: &CallInfo, now: f64) -> Value {
         "src_num": -1,
         "rec_state": -1,
         "rec_state_type": "",
-        "conventional": c.system == CONVENTIONAL,
+        "conventional": d.conventional(c.system),
         "encrypted": c.encrypted,
         "emergency": c.emergency,
         "start_time": start,
@@ -283,7 +289,7 @@ pub fn call_end(d: &Directory, c: &ConcludedCall, prefer_m4a: bool, now: i64) ->
         "src_num": r.extra.get("source_num").and_then(Value::as_i64).unwrap_or(-1),
         "rec_state": 6,
         "rec_state_type": "STOPPED",
-        "conventional": c.system == CONVENTIONAL,
+        "conventional": d.conventional(c.system),
         "encrypted": r.encrypted,
         "emergency": r.emergency,
         "start_time": r.start_time,
@@ -392,7 +398,7 @@ pub fn rates(d: &Directory, s: &Status, interval: f64) -> Value {
     Value::Array(
         s.systems
             .iter()
-            .filter(|y| y.index != CONVENTIONAL)
+            .filter(|y| !d.conventional(y.index))
             .map(|y| {
                 json!({
                     "sys_num": d.sys_num(y.index),
@@ -447,7 +453,7 @@ mod tests {
 
     fn dir() -> Directory {
         Directory {
-            systems: vec![(0, "east".into(), "p25".into()), (1, "west".into(), "p25".into()), (CONVENTIONAL, "conv".into(), "conventional".into())],
+            systems: vec![(0, "east".into(), "p25".into()), (1, "west".into(), "p25".into()), (2, "conv".into(), "conventional".into())],
             ..Default::default()
         }
     }
@@ -457,7 +463,7 @@ mod tests {
         let d = dir();
         let c = CallInfo {
             id: 42,
-            system: CONVENTIONAL,
+            system: 2,
             short_name: "conv".into(),
             talkgroup: 101,
             freq_hz: 154_430_000,
@@ -571,7 +577,7 @@ mod tests {
             time: 0.0,
             systems: vec![
                 SystemStatus { index: 1, short_name: "west".into(), control_channel_hz: Some(851_012_500), decode_rate: 38.456, ..Default::default() },
-                SystemStatus { index: CONVENTIONAL, short_name: "conv".into(), ..Default::default() },
+                SystemStatus { index: 2, short_name: "conv".into(), ..Default::default() },
             ],
         };
         let v = rates(&d, &s, 5.0);
