@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use trunk_recorder_plugin::{base64, topic, CallInfo, ConcludedCall, Host, Manifest, NoConfig, Outcome, Plugin, Setup, Status, UnitEvent, CONVENTIONAL};
+use trunk_recorder_plugin::{base64, topic, CallInfo, ConcludedCall, Host, Manifest, NoConfig, Outcome, Plugin, Setup, Status, UnitEvent};
 
 use payload::Directory;
 use publisher::{unix_now, Kind, Limits, Publisher};
@@ -252,7 +252,7 @@ impl Plugin for Mqtt {
         publisher.send(&topic, Kind::Retained, "systems", "systems", payload::systems(&dir));
         publisher.send(&topic, Kind::Retained, "config", "config", payload::config(&dir, &setup.capture_dir, &instance_id));
         if c.home_assistant {
-            let controlled: Vec<String> = setup.systems.iter().filter(|s| s.index != CONVENTIONAL).map(|s| s.short_name.clone()).collect();
+            let controlled: Vec<String> = setup.systems.iter().filter(|s| s.kind != "conventional").map(|s| s.short_name.clone()).collect();
             let discovery = homeassistant::Discovery { prefix: &discovery_prefix, topic: &topic, instance_id: &instance_id, systems: &controlled };
             for (t, v) in discovery.messages() {
                 publisher.send_raw(&t, Kind::Retained, serde_json::to_vec(&v).unwrap_or_default());
