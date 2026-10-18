@@ -241,10 +241,6 @@ pub fn unit_call(d: &Directory, c: &CallInfo) -> Option<Value> {
     Some(extend(extend(head, d.tg_fields(c.system, c.talkgroup, &c.patched_talkgroups)), tail))
 }
 
-fn extra_f64(c: &ConcludedCall, key: &str) -> f64 {
-    c.call.extra.get(key).and_then(Value::as_f64).unwrap_or(0.0)
-}
-
 /// The audio file `call_filename` names: the M4A when `m4a`, else the WAV.
 fn file_name(p: &Path) -> String {
     p.display().to_string()
@@ -285,8 +281,8 @@ pub fn call_end(d: &Directory, c: &ConcludedCall, prefer_m4a: bool, now: i64) ->
         "phase2_tdma": r.phase2_tdma,
         "tdma_slot": r.tdma_slot,
         "analog": r.audio_type == "analog",
-        "rec_num": r.extra.get("recorder_num").and_then(Value::as_i64).unwrap_or(-1),
-        "src_num": r.extra.get("source_num").and_then(Value::as_i64).unwrap_or(-1),
+        "rec_num": r.recorder_num,
+        "src_num": r.source_num,
         "rec_state": 6,
         "rec_state_type": "STOPPED",
         "conventional": d.conventional(c.system),
@@ -298,20 +294,20 @@ pub fn call_end(d: &Directory, c: &ConcludedCall, prefer_m4a: bool, now: i64) ->
         "error_count": r.error_count(),
         "spike_count": r.spike_count(),
         "retry_attempt": 0,
-        "freq_error": extra_f64(c, "freq_error"),
-        "signal": round2(extra_f64(c, "signal")),
-        "noise": round2(extra_f64(c, "noise")),
+        "freq_error": r.freq_error,
+        "signal": round2(r.signal.unwrap_or(0.0)),
+        "noise": round2(r.noise.unwrap_or(0.0)),
         "call_filename": file,
     });
     // Trunk Recorder Pro's own measurements, when it made them (not in Trunk Recorder's message).
-    for k in ["snr", "clean_voice_pct"] {
-        if let Some(x) = r.extra.get(k).and_then(Value::as_f64) {
+    for (k, x) in [("snr", r.snr), ("clean_voice_pct", r.clean_voice_pct)] {
+        if let Some(x) = x {
             v[k] = json!(round2(x));
         }
     }
     // The call JSON writes -1 for no cipher heard.
-    let id = |k: &str| r.extra.get(k).and_then(Value::as_i64).filter(|x| *x >= 0);
-    cipher(&mut v, id("algid"), id("key_id"), r.decrypted);
+    let id = |x: i64| Some(x).filter(|x| *x >= 0);
+    cipher(&mut v, id(r.algid), id(r.key_id), r.decrypted);
     v
 }
 
@@ -319,12 +315,7 @@ pub fn call_end(d: &Directory, c: &ConcludedCall, prefer_m4a: bool, now: i64) ->
 pub fn unit_ends(d: &Directory, c: &ConcludedCall) -> Vec<Value> {
     let r = &c.call;
     // Decoder errors by stretch of audio, to share out between transmissions.
-    let errors: Vec<(f64, u64)> = r
-        .extra
-        .get("errorList")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().map(|e| (e["pos"].as_f64().unwrap_or(0.0), e["error_count"].as_u64().unwrap_or(0))).collect())
-        .unwrap_or_default();
+    let errors: Vec<(f64, u64)> = r.error_list.iter().map(|e| (e.pos, e.error_count)).collect();
     let n = r.src_list.len();
     (0..n)
         .map(|i| {
@@ -449,7 +440,7 @@ pub fn config(d: &Directory, capture_dir: &Path, instance_id: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trunk_recorder_plugin::{CallRecord, SrcEntry, SystemStatus};
+    use trunk_recorder_plugin::{CallRecord, ErrorInterval, SrcEntry, SystemStatus};
 
     fn dir() -> Directory {
         Directory {
@@ -494,12 +485,9 @@ mod tests {
             SrcEntry { src: 1, time: 100, pos: 0.0, tag_ota: "ENG 1".into(), ..Default::default() },
             SrcEntry { src: 2, time: 104, pos: 4.0, lat: Some(30.0529), lon: Some(-83.17565), ..Default::default() },
         ];
-        call.extra.insert("errorList".into(), json!([{ "pos": 0.0, "error_count": 3 }, { "pos": 5.0, "error_count": 4 }, { "pos": 9.5, "error_count": 1 }]));
-        call.extra.insert("snr".into(), json!(18.5));
-        call.extra.insert("clean_voice_pct".into(), Value::Null);
-        // No cipher heard.
-        call.extra.insert("algid".into(), json!(-1));
-        call.extra.insert("key_id".into(), json!(-1));
+        call.error_list = [(0.0, 3), (5.0, 4), (9.5, 1)].map(|(pos, error_count)| ErrorInterval { pos, error_count, ..Default::default() }).to_vec();
+        call.snr = Some(18.5);
+        // (No cipher heard, and clean voice not measured: the record's defaults.)
         let c = ConcludedCall { path: "west/x".into(), system: 1, call, ..Default::default() };
         let ends = unit_ends(&d, &c);
         assert_eq!(ends.len(), 2);
@@ -556,7 +544,7 @@ mod tests {
         let mut call = CallRecord { talkgroup: 5, talkgroup_tag: "Fire Disp".into(), talkgroup_group_tag: "Fire Dispatch".into(), ..Default::default() };
         call.src_list = vec![SrcEntry { src: 77, tag: "Medic 7".into(), ..Default::default() }];
         d.learn_concluded(&ConcludedCall { system: 0, call, ..Default::default() });
-        let e = UnitEvent { system: 0, short_name: "east".into(), kind: "affiliation".into(), unit: 77, talkgroup: Some(5), time: 0.0 };
+        let e = UnitEvent { system: 0, short_name: "east".into(), kind: "affiliation".into(), unit: 77, talkgroup: Some(5), time: 0.0, ..Default::default() };
         let (sub, v) = unit_event(&d, &e).unwrap();
         assert_eq!(sub, "join");
         assert_eq!(v["unit_alpha_tag"], "Medic 7");
