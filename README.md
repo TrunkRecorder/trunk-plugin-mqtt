@@ -36,6 +36,8 @@ and add `target/release/mqtt` with **Add from a file…**.
 | Broker | `broker` | `tcp://localhost:1883` | Broker URL with protocol and port: `tcp://`, `ssl://`, `ws://` or `wss://` |
 | Topic | `topic` | | Base topic for status messages. Required. |
 | Unit topic | `unitTopic` | | Base topic for unit activity, followed by the system's short name. Empty turns it off. |
+| Disable system reports | `disableSystems` | | Systems that publish nothing ([below](#disabling-reports-by-system)) |
+| Disable unit reports | `disableUnits` | | Systems that publish nothing to the unit topic |
 | Username | `username` | | Broker username |
 | Password | `password` | | Broker password |
 | Client ID | `clientId` | `tr-status-<crc>` | Made from the broker and topic when empty |
@@ -44,6 +46,7 @@ and add `target/release/mqtt` with **Add from a file…**.
 | MQTT version | `mqttVersion` | `3` | `3` (3.1.1) or `5` |
 | Send call audio | `mqttAudio` | `false` | Publish each recorded call's audio, base64-encoded, to `topic/audio` |
 | Audio format | `mqttAudioType` | `wav` | `wav`, `m4a`, `both` or `none` (metadata only) |
+| Disable audio reports | `disableAudio` | | Systems whose calls are published without their audio |
 | Queue age limit | `queueMaxAge` | `60` | Seconds a message may wait for the broker before it's dropped |
 | Audio age limit | `audioMaxAge` | `300` | The same, for audio |
 | Queue size limit | `queueMaxMb` | `32` | MB of waiting messages; past this, the oldest are dropped |
@@ -86,6 +89,18 @@ Every message is JSON: `{"type": <subtopic>, <name>: <data>, "timestamp": <unix 
 | unitTopic/shortname | `location` | | Location registration |
 | unitTopic/shortname | `call_alert` | | Unit-to-unit page |
 | unitTopic/shortname | `emergency` | | Emergency alarm |
+
+### Disabling reports by system
+
+The settings are the same for every system: there's one broker connection. To keep a system
+off the broker, tick it under **Disable system reports**. Its calls, unit activity and audio
+aren't published, and it's left out of `calls_active`, `rates`, `systems`, `system` and
+`config`. The other systems keep their `sys_num`, and the recorder's status still goes out.
+Its recorded calls are reported to the recorder as skipped, so their files aren't held.
+With Home Assistant discovery on, its entities are taken out.
+
+**Disable unit reports** keeps a system's calls but publishes nothing for it under the unit
+topic; **Disable audio reports** publishes its calls without `topic/audio`.
 
 Message fields match the Trunk Recorder plugin's [example messages](https://github.com/TrunkRecorder/tr-plugin-mqtt/blob/main/example_messages.md).
 

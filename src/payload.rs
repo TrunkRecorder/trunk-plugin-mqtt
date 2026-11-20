@@ -2,7 +2,7 @@
 //! existing consumers read them unchanged. Fields the recorder doesn't report
 //! keep their place with an empty or zero value.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -34,12 +34,27 @@ pub struct Directory {
     identity: HashMap<u16, Identity>,
     talkgroups: HashMap<(u16, u32), Talkgroup>,
     units: HashMap<(u16, u32), String>,
+    /// Short names of the systems left out: nothing of theirs is published.
+    left_out: HashSet<String>,
 }
 
 impl Directory {
     /// `systems`: (index, short name, kind), in the recorder's order.
     pub fn new(systems: impl IntoIterator<Item = (u16, String, String)>) -> Directory {
         Directory { systems: systems.into_iter().collect(), ..Default::default() }
+    }
+
+    /// Leave out the systems named in `names` (short names); the names no system has.
+    /// They keep their `sys_num`, so the others' don't move when the list changes.
+    pub fn disable_systems(&mut self, names: &[String]) -> Vec<String> {
+        let names: Vec<&str> = names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).collect();
+        self.left_out = names.iter().filter(|n| self.systems.iter().any(|s| s.1 == **n)).map(|n| n.to_string()).collect();
+        names.into_iter().filter(|n| !self.left_out.contains(*n)).map(String::from).collect()
+    }
+
+    /// Whether the system named `short_name` is published (not left out).
+    pub fn published(&self, short_name: &str) -> bool {
+        !self.left_out.contains(short_name)
     }
 
     /// Whether system `index` is conventional (by its kind: recorders since
@@ -389,7 +404,7 @@ pub fn rates(d: &Directory, s: &Status, interval: f64) -> Value {
     Value::Array(
         s.systems
             .iter()
-            .filter(|y| !d.conventional(y.index))
+            .filter(|y| !d.conventional(y.index) && d.published(&y.short_name))
             .map(|y| {
                 json!({
                     "sys_num": d.sys_num(y.index),
@@ -405,12 +420,13 @@ pub fn rates(d: &Directory, s: &Status, interval: f64) -> Value {
 
 /// The systems (`systems`, retained).
 pub fn systems(d: &Directory) -> Value {
-    Value::Array((0..d.systems.len()).map(|i| system_at(d, i)).collect())
+    Value::Array((0..d.systems.len()).filter(|&i| d.published(&d.systems[i].1)).map(|i| system_at(d, i)).collect())
 }
 
-/// One system (`system`), as in `systems`; None for one the recorder didn't name at the start.
+/// One system (`system`), as in `systems`; None for one the recorder didn't name at the start, or one left out.
 pub fn system(d: &Directory, index: u16) -> Option<Value> {
-    Some(system_at(d, d.systems.iter().position(|s| s.0 == index)?))
+    let i = d.systems.iter().position(|s| s.0 == index)?;
+    d.published(&d.systems[i].1).then(|| system_at(d, i))
 }
 
 /// The system at `sys_num` `i`, with its identity as Trunk Recorder writes it:
@@ -433,7 +449,13 @@ fn system_at(d: &Directory, i: usize) -> Value {
 
 /// What the recorder is set up with (`config`, retained).
 pub fn config(d: &Directory, capture_dir: &Path, instance_id: &str) -> Value {
-    let systems: Vec<Value> = d.systems.iter().enumerate().map(|(i, (_, name, kind))| json!({ "sys_num": i, "sys_name": name, "system_type": kind })).collect();
+    let systems: Vec<Value> = d
+        .systems
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| d.published(&s.1))
+        .map(|(i, (_, name, kind))| json!({ "sys_num": i, "sys_name": name, "system_type": kind }))
+        .collect();
     json!({ "systems": systems, "capture_dir": capture_dir.display().to_string(), "instance_id": instance_id })
 }
 
@@ -594,5 +616,29 @@ mod tests {
         assert!(d.learn_identity(&status(west)).is_empty());
         assert_eq!(system(&d, 1).unwrap()["site_id"], 7);
         assert!(system(&d, 9).is_none());
+    }
+
+    #[test]
+    fn systems_left_out_are_in_no_list() {
+        let mut d = dir();
+        assert_eq!(d.disable_systems(&["east".into(), " gone ".into(), "".into()]), ["gone"]);
+        assert!(!d.published("east") && d.published("west"));
+        let names = |v: &Value| v.as_array().unwrap().iter().map(|s| s["sys_name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(names(&systems(&d)), ["west", "conv"]);
+        // The others keep their sys_num.
+        assert_eq!(systems(&d)[0]["sys_num"], 1);
+        assert_eq!(names(&config(&d, Path::new("/x"), "i")["systems"]), ["west", "conv"]);
+        assert!(system(&d, 0).is_none() && system(&d, 1).is_some());
+        let s = Status {
+            time: 0.0,
+            systems: vec![
+                SystemStatus { index: 0, short_name: "east".into(), decode_rate: 40.0, ..Default::default() },
+                SystemStatus { index: 1, short_name: "west".into(), decode_rate: 39.0, ..Default::default() },
+            ],
+        };
+        assert_eq!(names(&rates(&d, &s, 1.0)), ["west"]);
+        // Back again once it's no longer left out.
+        d.disable_systems(&[]);
+        assert_eq!(names(&rates(&d, &s, 1.0)), ["east", "west"]);
     }
 }

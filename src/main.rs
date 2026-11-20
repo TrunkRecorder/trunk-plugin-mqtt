@@ -7,7 +7,7 @@ mod payload;
 mod publisher;
 mod transport;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,8 +22,11 @@ use payload::Directory;
 use publisher::{unix_now, Kind, Limits, Publisher};
 use transport::Broker;
 
+// The same for every system (one connection): systems don't override them. A
+// system is left out, or its unit activity or audio, by the lists here.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", default)]
+#[schemars(extend("x-global" = true))]
 struct Config {
     /// Broker
     ///
@@ -44,6 +47,16 @@ struct Config {
     /// publish it.
     #[serde(alias = "unit_topic")]
     unit_topic: String,
+    /// Disable system reports
+    ///
+    /// Disabled systems publish nothing: no calls, unit activity or audio, and no place in the active calls, rates or system lists.
+    #[schemars(extend("x-systems" = true))]
+    disable_systems: Vec<String>,
+    /// Disable unit reports
+    ///
+    /// Disabled systems publish nothing to the unit topic.
+    #[schemars(extend("x-systems" = true))]
+    disable_units: Vec<String>,
     /// Username
     username: String,
     /// Password
@@ -83,6 +96,11 @@ struct Config {
     /// Broadcastify); otherwise only WAV is sent.
     #[serde(alias = "mqtt_audio_type")]
     mqtt_audio_type: AudioType,
+    /// Disable audio reports
+    ///
+    /// Disabled systems' calls are published without their audio.
+    #[schemars(extend("x-systems" = true))]
+    disable_audio: Vec<String>,
     /// Queue age limit
     ///
     /// Seconds a message may wait for the broker before it's dropped.
@@ -136,6 +154,8 @@ impl Default for Config {
             broker: "tcp://localhost:1883".into(),
             topic: String::new(),
             unit_topic: String::new(),
+            disable_systems: Vec::new(),
+            disable_units: Vec::new(),
             username: String::new(),
             password: String::new(),
             client_id: String::new(),
@@ -144,6 +164,7 @@ impl Default for Config {
             mqtt_version: 3,
             mqtt_audio: false,
             mqtt_audio_type: AudioType::Wav,
+            disable_audio: Vec::new(),
             queue_max_age: 60,
             audio_max_age: 300,
             queue_max_mb: 32,
@@ -179,6 +200,9 @@ struct Mqtt {
     topic: String,
     unit_topic: Option<String>,
     audio: Option<AudioType>,
+    /// Systems (by short name) whose unit activity, or audio, isn't published.
+    no_units: HashSet<String>,
+    no_audio: HashSet<String>,
     state: Arc<Mutex<Active>>,
     stop_ticker: Arc<AtomicBool>,
     last_status: Option<Instant>,
@@ -248,29 +272,51 @@ impl Plugin for Mqtt {
         ));
         let publisher = Publisher::start(settings, limits, c.qos, &topic, &instance_id, host.clone());
 
-        let dir = Directory::new(setup.systems.iter().map(|s| (s.index, s.short_name.clone(), s.kind.clone())));
+        let mut dir = Directory::new(setup.systems.iter().map(|s| (s.index, s.short_name.clone(), s.kind.clone())));
+        let unknown = dir.disable_systems(&c.disable_systems);
+        if !unknown.is_empty() {
+            host.warn(format!("disabled system reports: no system is named {}", unknown.join(", ")));
+        }
+        let left_out: Vec<&str> = setup.systems.iter().filter(|s| !dir.published(&s.short_name)).map(|s| s.short_name.as_str()).collect();
+        if !left_out.is_empty() {
+            host.info(format!("system reports disabled for {}", left_out.join(", ")));
+        }
+        let names = |v: &[String]| v.iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect::<HashSet<String>>();
         publisher.send(&topic, Kind::Retained, "systems", "systems", payload::systems(&dir));
         publisher.send(&topic, Kind::Retained, "config", "config", payload::config(&dir, &setup.capture_dir, &instance_id));
         if c.home_assistant {
-            let controlled: Vec<String> = setup.systems.iter().filter(|s| s.kind != "conventional").map(|s| s.short_name.clone()).collect();
-            let discovery = homeassistant::Discovery { prefix: &discovery_prefix, topic: &topic, instance_id: &instance_id, systems: &controlled };
+            let controlled = |published: bool| -> Vec<String> {
+                setup.systems.iter().filter(|s| s.kind != "conventional" && dir.published(&s.short_name) == published).map(|s| s.short_name.clone()).collect()
+            };
+            let (shown, hidden) = (controlled(true), controlled(false));
+            let discovery = homeassistant::Discovery { prefix: &discovery_prefix, topic: &topic, instance_id: &instance_id, systems: &shown };
             for (t, v) in discovery.messages() {
                 publisher.send_raw(&t, Kind::Retained, serde_json::to_vec(&v).unwrap_or_default());
+            }
+            // A system left out since: an empty retained config takes its entities out of Home Assistant.
+            for t in discovery.system_topics(&hidden) {
+                publisher.send_raw(&t, Kind::Retained, Vec::new());
             }
         }
         let state = Arc::new(Mutex::new(Active { dir, calls: BTreeMap::new() }));
         let stop_ticker = Arc::new(AtomicBool::new(false));
         start_ticker(publisher.clone(), topic.clone(), state.clone(), stop_ticker.clone());
 
-        Ok(Mqtt { host, publisher, topic, unit_topic, audio: c.mqtt_audio.then_some(c.mqtt_audio_type), state, stop_ticker, last_status: None })
+        let audio = c.mqtt_audio.then_some(c.mqtt_audio_type);
+        let (no_units, no_audio) = (names(&c.disable_units), names(&c.disable_audio));
+        Ok(Mqtt { host, publisher, topic, unit_topic, audio, no_units, no_audio, state, stop_ticker, last_status: None })
     }
 
     fn call_start(&mut self, call: CallInfo) {
         let mut st = self.state.lock().unwrap();
+        // Not kept either: a call left out isn't among the active calls.
+        if !st.dir.published(&call.short_name) {
+            return;
+        }
         st.dir.learn_start(&call);
-        if let Some(t) = &self.unit_topic {
+        if let Some(t) = self.unit_topic_for(&call.short_name) {
             if let Some(v) = payload::unit_call(&st.dir, &call) {
-                self.publisher.send(&format!("{t}/{}", call.short_name), Kind::Event, "call", "call", v);
+                self.publisher.send(&t, Kind::Event, "call", "call", v);
             }
         }
         self.publisher.send(&self.topic, Kind::Event, "call", "call_start", payload::active_call(&st.dir, &call, now_f64()));
@@ -281,7 +327,7 @@ impl Plugin for Mqtt {
         let mut st = self.state.lock().unwrap();
         st.calls.remove(&call.id);
         // A recorded call is published once its files are written (call_concluded).
-        if !call.recording {
+        if !call.recording && st.dir.published(&call.short_name) {
             let v = payload::ignored_call(&st.dir, &call, now_f64());
             drop(st);
             self.publisher.send(&self.topic, Kind::Event, "call", "call_ignored", v);
@@ -290,18 +336,24 @@ impl Plugin for Mqtt {
 
     fn call_concluded(&mut self, call: ConcludedCall) {
         let mut st = self.state.lock().unwrap();
+        // Settled all the same, or the recorder keeps its files and counts it as failed.
+        if !st.dir.published(&call.call.short_name) {
+            drop(st);
+            self.host.call_result(&call.path, Outcome::Skipped, "system reports are disabled for its system", "");
+            return;
+        }
         st.dir.learn_concluded(&call);
         let prefer_m4a = matches!(self.audio, Some(AudioType::M4a));
         let end = payload::call_end(&st.dir, &call, prefer_m4a, unix_now());
-        let ends = if self.unit_topic.is_some() { payload::unit_ends(&st.dir, &call) } else { Vec::new() };
+        let unit_topic = self.unit_topic_for(&call.call.short_name);
+        let ends = if unit_topic.is_some() { payload::unit_ends(&st.dir, &call) } else { Vec::new() };
         drop(st);
-        if let Some(t) = &self.unit_topic {
-            let t = format!("{t}/{}", call.call.short_name);
+        if let Some(t) = unit_topic {
             for v in ends {
                 self.publisher.send(&t, Kind::Event, "end", "end", v);
             }
         }
-        if let Some(kind) = self.audio {
+        if let Some(kind) = self.audio.filter(|_| !self.no_audio.contains(&call.call.short_name)) {
             match audio(&call, kind) {
                 Ok(v) => self.publisher.send(&self.topic, Kind::Audio, "call", "audio", v),
                 Err(e) => self.host.warn(format!("{}: audio not sent: {e}", call.path)),
@@ -319,10 +371,13 @@ impl Plugin for Mqtt {
     }
 
     fn unit(&mut self, event: UnitEvent) {
-        let Some(t) = &self.unit_topic else { return };
         let st = self.state.lock().unwrap();
+        if !st.dir.published(&event.short_name) {
+            return;
+        }
+        let Some(t) = self.unit_topic_for(&event.short_name) else { return };
         if let Some((sub, v)) = payload::unit_event(&st.dir, &event) {
-            self.publisher.send(&format!("{t}/{}", event.short_name), Kind::Event, sub, sub, v);
+            self.publisher.send(&t, Kind::Event, sub, sub, v);
         }
     }
 
@@ -333,7 +388,8 @@ impl Plugin for Mqtt {
         self.publisher.send(&self.topic, Kind::Snapshot, "rates", "rates", payload::rates(&st.dir, &status, interval));
         // A system's identity, as its control channel states it, as Trunk Recorder
         // sends it: the whole list again (retained), then the system that changed.
-        let changed = st.dir.learn_identity(&status);
+        let mut changed = st.dir.learn_identity(&status);
+        changed.retain(|&i| payload::system(&st.dir, i).is_some());
         if !changed.is_empty() {
             self.publisher.send(&self.topic, Kind::Retained, "systems", "systems", payload::systems(&st.dir));
             for index in changed {
@@ -347,6 +403,14 @@ impl Plugin for Mqtt {
     fn shutdown(&mut self, grace: Duration) {
         self.stop_ticker.store(true, Ordering::Relaxed);
         self.publisher.shutdown(grace);
+    }
+}
+
+impl Mqtt {
+    /// Where system `short_name`'s unit activity goes (`unit_topic/short_name`); None when it isn't published.
+    fn unit_topic_for(&self, short_name: &str) -> Option<String> {
+        let t = self.unit_topic.as_ref()?;
+        (!self.no_units.contains(short_name)).then(|| format!("{t}/{short_name}"))
     }
 }
 
@@ -446,6 +510,8 @@ mod tests {
         let p = &schema["properties"];
         assert_eq!((p["qos"]["enum"].clone(), p["mqttVersion"]["enum"].clone()), (json!([0, 1, 2]), json!([3, 5])));
         assert_eq!(p["mqttVersion"]["x-enum-labels"], json!(["3.1.1", "5"]));
+        assert_eq!(schema["x-global"], true);
+        assert_eq!(p["disableSystems"]["x-systems"], true);
     }
 
     #[test]
