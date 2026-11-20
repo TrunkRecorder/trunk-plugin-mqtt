@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.8]
+
+- Disable system reports, unit reports and audio reports, each a list of systems to tick: a
+  disabled system publishes nothing (no calls, unit activity or audio, and no place in
+  `calls_active`, `rates`, `systems`, `system` or `config`), or nothing to the unit topic, or
+  its calls without audio. Other systems keep their `sys_num`. A disabled system's recorded
+  calls are reported as skipped, and its Home Assistant entities are taken out.
+- The settings are marked the same for every system (`x-global`): a Trunk Recorder Pro that
+  knows the mark no longer shows them to override on each system's card, which the plugin
+  never read.
+
 ## [0.1.7]
 
 - Built with trunk-recorder-plugin 0.5.0 from crates.io, for Trunk Recorder Pro v0.2.0. A

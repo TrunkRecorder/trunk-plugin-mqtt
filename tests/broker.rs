@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use trunk_recorder_plugin::{testing, CallInfo, HostMessage, Shutdown, Status, SystemStatus, UnitEvent};
+use trunk_recorder_plugin::{testing, CallInfo, HostMessage, Shutdown, Status, SystemInfo, SystemStatus, UnitEvent};
 
 struct Broker {
     child: Child,
@@ -215,6 +215,106 @@ fn publishes_to_a_broker() {
     // The connected status comes before anything else of ours.
     let first = topics.iter().position(|t| t.starts_with("tr/")).unwrap();
     assert_eq!(topics[first], "tr/feeds/trunk_recorder/status");
+}
+
+/// A system left out: none of its calls, units, audio or rates, and no place in
+/// the lists; the other system's no unit activity or audio, but its calls.
+#[test]
+fn systems_left_out_arent_published() {
+    let Some(broker) = mosquitto() else {
+        eprintln!("no mosquitto: skipped");
+        return;
+    };
+    let got = subscribe(broker.port, "#");
+    std::thread::sleep(Duration::from_millis(300));
+    let dir = testing::temp_dir("mqtt-left-out");
+    let mut hello = testing::hello(
+        &dir,
+        json!({
+            "broker": format!("tcp://127.0.0.1:{}", broker.port), "topic": "tr/feeds", "unitTopic": "tr/units", "mqttAudio": true,
+            "homeAssistant": true, "instanceId": "test", "disableSystems": ["dmr"], "disableUnits": ["sys1"], "disableAudio": ["sys1"]
+        }),
+    );
+    hello.systems.push(SystemInfo { index: 1, short_name: "dmr".into(), kind: "dmr".into(), config: Value::Null, ..Default::default() });
+    let mut plugin = Command::new(env!("CARGO_BIN_EXE_mqtt")).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
+    let mut stdin = plugin.stdin.take().unwrap();
+    let out = plugin.stdout.take().unwrap();
+    let log = std::thread::spawn(move || std::io::read_to_string(out).unwrap_or_default());
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let p25 =
+        CallInfo { id: 5, system: 0, short_name: "sys1".into(), talkgroup: 101, recording: true, start_time: now, units: vec![1234], ..Default::default() };
+    let dmr = CallInfo { id: 6, system: 1, short_name: "dmr".into(), talkgroup: 9, ..p25.clone() };
+    let unit = |system: u16, short_name: &str| UnitEvent {
+        system,
+        short_name: short_name.into(),
+        kind: "affiliation".into(),
+        unit: 1234,
+        talkgroup: Some(9),
+        time: now,
+        ..Default::default()
+    };
+    let rate = |index: u16, short_name: &str| SystemStatus {
+        index,
+        short_name: short_name.into(),
+        control_channel_hz: Some(851_000_000),
+        decode_rate: 40.0,
+        sys_id: Some(0x555),
+        ..Default::default()
+    };
+    let status = Status { time: now, systems: vec![rate(0, "sys1"), rate(1, "dmr")] };
+    for m in [
+        HostMessage::Hello(hello),
+        HostMessage::CallStart(p25.clone()),
+        HostMessage::CallStart(dmr.clone()),
+        HostMessage::Unit(unit(0, "sys1")),
+        HostMessage::Unit(unit(1, "dmr")),
+        HostMessage::Status(status),
+    ] {
+        stdin.write_all(line(&m).as_bytes()).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    let mut dmr_call = testing::call(&dir, "dmr", 9);
+    dmr_call.system = 1;
+    for m in [
+        HostMessage::CallEnd(p25),
+        HostMessage::CallEnd(CallInfo { recording: false, ..dmr }),
+        HostMessage::CallConcluded(testing::call(&dir, "sys1", 101)),
+        HostMessage::CallConcluded(dmr_call),
+        HostMessage::Shutdown(Shutdown { grace_s: 5.0 }),
+    ] {
+        stdin.write_all(line(&m).as_bytes()).unwrap();
+    }
+    drop(stdin);
+    assert!(plugin.wait().unwrap().success());
+    std::thread::sleep(Duration::from_millis(300));
+    let log = log.join().unwrap();
+    // Both calls settled: the one left out as skipped, so the recorder lets its files go.
+    assert!(log.lines().any(|l| l.contains("\"call.result\"") && l.contains("\"ok\"")), "{log}");
+    assert!(log.lines().any(|l| l.contains("\"call.result\"") && l.contains("\"skipped\"") && l.contains("reports are disabled")), "{log}");
+
+    let got = got.lock().unwrap().clone();
+    let topics: Vec<&str> = got.iter().map(|(t, _, _)| t.as_str()).collect();
+    for t in ["tr/feeds/call_start", "tr/feeds/call_end", "tr/feeds/calls_active", "tr/feeds/rates", "tr/feeds/system"] {
+        assert!(topics.contains(&t), "{t} missing from {topics:?}");
+    }
+    for t in ["tr/feeds/audio", "tr/feeds/call_ignored"] {
+        assert!(!topics.contains(&t), "{t} published: {topics:?}");
+    }
+    assert!(!topics.iter().any(|t| t.starts_with("tr/units/")), "unit activity published: {topics:?}");
+    // The DMR system is in nothing that went out, but the recorder's own messages still did.
+    for (t, v, _) in &got {
+        let s = v.to_string();
+        assert!(!s.contains("\"dmr\""), "{t}: {s}");
+    }
+    assert!(topics.contains(&"tr/feeds/trunk_recorder/status"));
+    let starts: Vec<u64> = got.iter().filter(|(t, _, _)| t == "tr/feeds/call_start").map(|(_, v, _)| v["call"]["talkgroup"].as_u64().unwrap()).collect();
+    assert_eq!(starts, [101]);
+    let active = got.iter().filter(|(t, _, _)| t == "tr/feeds/calls_active").map(|(_, v, _)| v["calls"].as_array().map_or(0, |a| a.len())).max();
+    assert_eq!(active, Some(1));
+    // Home Assistant has the P25 system's entities, and the DMR one's cleared.
+    assert!(topics.contains(&"homeassistant/sensor/test/sys1_decode_rate/config"));
+    let cleared = got.iter().find(|(t, _, _)| t == "homeassistant/sensor/test/dmr_decode_rate/config");
+    assert!(cleared.is_some_and(|(_, v, _)| v.is_null()), "{cleared:?}");
 }
 
 /// Home Assistant's discovery is retained at the broker, and says "unavailable" with the recorder.

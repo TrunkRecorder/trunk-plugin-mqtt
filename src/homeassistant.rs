@@ -103,6 +103,15 @@ impl Discovery<'_> {
         }
         out
     }
+
+    /// The configuration topics of `systems`' entities (to take them out with an empty message).
+    pub fn system_topics(&self, systems: &[String]) -> Vec<String> {
+        let node = id(self.instance_id);
+        systems
+            .iter()
+            .flat_map(|name| ["decode_rate", "control_channel", "active_calls"].map(|o| format!("{}/sensor/{node}/{}_{o}/config", self.prefix, id(name))))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +137,15 @@ mod tests {
         assert_eq!(ids.len(), m.len());
         assert!(m.iter().all(|(_, v)| v["device"]["identifiers"] == json!(["trunk_recorder_trunk-recorder"])));
         assert_eq!(m[0].1["device"]["name"], "Trunk Recorder");
+    }
+
+    /// A system's entities can be found again to take them out.
+    #[test]
+    fn a_systems_topics_are_its_entities() {
+        let systems = vec!["west".to_string()];
+        let d = Discovery { prefix: "homeassistant", topic: "tr/feeds", instance_id: "n", systems: &systems };
+        let made: Vec<String> = d.messages().into_iter().skip(3).map(|(t, _)| t).collect();
+        assert_eq!(d.system_topics(&systems), made);
     }
 
     #[test]
