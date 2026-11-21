@@ -99,6 +99,11 @@ aren't published, and it's left out of `calls_active`, `rates`, `systems`, `syst
 Its recorded calls are reported to the recorder as skipped, so their files aren't held.
 With Home Assistant discovery on, its entities are taken out.
 
+Trunk Recorder Pro v0.4.0 can also turn the plugin off for a system (**Systems** on the
+plugin's card in Setup → Plugins). The plugin then isn't told of the system at all, so the
+systems after it move up a `sys_num`, and Home Assistant entities made for it before are left
+as they were. **Disable system reports** keeps every `sys_num` and takes those entities out.
+
 **Disable unit reports** keeps a system's calls but publishes nothing for it under the unit
 topic; **Disable audio reports** publishes its calls without `topic/audio`.
 
@@ -118,6 +123,11 @@ Trunk Recorder Pro reports some things Trunk Recorder doesn't, and these are add
 - In call messages: `decrypted`, and `algid` and `key_id` once the call's voice has named its
   cipher (`132` is AES-256)
 - In unit `end`: `lat` and `lon`, when the radio sent its position
+- `sys_id` in every message that has `sys_num`: the system's id in Trunk Recorder Pro v0.4.0
+  and newer, which stays the same across restarts and renames (`sys_num` is the system's place
+  in the list, as in Trunk Recorder). Left out with an older recorder
+- In `rates`: a system of several sites has a rate for each, with its `site_name`. `systems`
+  and `system` give the identity of its first site
 
 ### Differences from the Trunk Recorder plugin
 

@@ -273,6 +273,7 @@ impl Plugin for Mqtt {
         let publisher = Publisher::start(settings, limits, c.qos, &topic, &instance_id, host.clone());
 
         let mut dir = Directory::new(setup.systems.iter().map(|s| (s.index, s.short_name.clone(), s.kind.clone())));
+        dir.set_ids(setup.systems.iter().map(|s| (s.index, s.id)));
         let unknown = dir.disable_systems(&c.disable_systems);
         if !unknown.is_empty() {
             host.warn(format!("disabled system reports: no system is named {}", unknown.join(", ")));

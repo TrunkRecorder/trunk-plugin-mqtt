@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.9]
+
+- Built with trunk-recorder-plugin 0.14.0, for Trunk Recorder Pro v0.4.0. `systems` and
+  `system` have the system ID, WACN, NAC, RFSS and site again: with 0.1.8 on recent recorders
+  they read as 0.
+- `sys_id` in every message with `sys_num`: the system's id, the same across restarts and
+  renames (from v0.4.0; left out with an older recorder).
+- A system of several sites: a rate for each in `rates`, with its `site_name`; its identity in
+  `systems` is its first site's, rather than each site's in turn.
+
 ## [0.1.8]
 
 - Disable system reports, unit reports and audio reports, each a list of systems to tick: a

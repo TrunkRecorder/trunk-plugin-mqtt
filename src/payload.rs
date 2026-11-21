@@ -36,6 +36,8 @@ pub struct Directory {
     units: HashMap<(u16, u32), String>,
     /// Short names of the systems left out: nothing of theirs is published.
     left_out: HashSet<String>,
+    /// Each system's id (by index): the same across runs and renames (0: a recorder before v0.4.0).
+    ids: HashMap<u16, u32>,
 }
 
 impl Directory {
@@ -63,26 +65,46 @@ impl Directory {
         self.systems.iter().any(|s| s.0 == index && s.2 == "conventional")
     }
 
+    /// Give each system (by index) its id, from `hello`.
+    pub fn set_ids(&mut self, ids: impl IntoIterator<Item = (u16, u32)>) {
+        self.ids = ids.into_iter().collect();
+    }
+
+    /// System `index`'s id: the same across runs and renames, unlike `sys_num` (none from an older recorder).
+    pub fn sys_id(&self, index: u16) -> Option<u32> {
+        self.ids.get(&index).copied().filter(|&id| id > 0)
+    }
+
+    /// `v` with system `index`'s `sys_id` last (after Trunk Recorder's fields), when the recorder gives one.
+    pub fn with_id(&self, index: u16, mut v: Value) -> Value {
+        if let (Some(id), Some(o)) = (self.sys_id(index), v.as_object_mut()) {
+            o.insert("sys_id".into(), id.into());
+        }
+        v
+    }
+
     pub fn sys_num(&self, index: u16) -> usize {
         self.systems.iter().position(|s| s.0 == index).unwrap_or(index as usize)
     }
 
     /// Learn each system's identity from a status; the systems whose identity changed.
-    /// What's known is kept: a value the status leaves out isn't forgotten.
+    /// What's known is kept: a value the status leaves out isn't forgotten. A system
+    /// of several sites has an entry for each: its first site's is the system's.
     pub fn learn_identity(&mut self, s: &Status) -> Vec<u16> {
         let mut changed = Vec::new();
-        for y in &s.systems {
-            let id = self.identity.entry(y.index).or_default();
+        let mut seen = HashSet::new();
+        for y in s.systems.iter().filter(|y| seen.insert(y.scope.index)) {
+            let id = self.identity.entry(y.scope.index).or_default();
             let new = Identity {
-                nac: y.nac.or(id.nac),
-                wacn: y.wacn.or(id.wacn),
-                sys_id: y.sys_id.or(id.sys_id),
-                rfss: y.rfss.or(id.rfss),
-                site: y.site.or(id.site),
+                nac: y.scope.identity.nac.map(u32::from).or(id.nac),
+                wacn: y.scope.identity.wacn.or(id.wacn),
+                sys_id: y.scope.identity.sys_id.or(id.sys_id),
+                rfss: y.scope.identity.rfss.or(id.rfss),
+                site: y.scope.identity.site.or(id.site),
             };
             if new != *id {
                 *id = new;
-                changed.push(y.index);
+                changed.push(y.scope.index);
             }
         }
         changed
@@ -226,7 +248,7 @@ pub fn active_call(d: &Directory, c: &CallInfo, now: f64) -> Value {
     });
     let mut v = extend(extend(head, d.tg_fields(c.system, c.talkgroup, &c.patched_talkgroups)), tail);
     cipher(&mut v, c.algid.map(i64::from), c.key_id.map(i64::from), c.decrypted);
-    v
+    d.with_id(c.system, v)
 }
 
 /// The cipher an encrypted call's voice named, once heard, and whether it was decrypted.
@@ -253,7 +275,7 @@ pub fn unit_call(d: &Directory, c: &CallInfo) -> Option<Value> {
     let unit = *c.units.first()?;
     let head = json!({ "sys_num": d.sys_num(c.system), "sys_name": c.short_name, "unit": unit, "unit_alpha_tag": d.unit_tag(c.system, unit) });
     let tail = json!({ "call_num": c.id, "freq": c.freq_hz as f64, "encrypted": c.encrypted, "start_time": c.start_time.floor() as i64 });
-    Some(extend(extend(head, d.tg_fields(c.system, c.talkgroup, &c.patched_talkgroups)), tail))
+    Some(d.with_id(c.system, extend(extend(head, d.tg_fields(c.system, c.talkgroup, &c.patched_talkgroups)), tail)))
 }
 
 /// The audio file `call_filename` names: the M4A when `m4a`, else the WAV.
@@ -323,7 +345,7 @@ pub fn call_end(d: &Directory, c: &ConcludedCall, prefer_m4a: bool, now: i64) ->
     // The call JSON writes -1 for no cipher heard.
     let id = |x: i64| Some(x).filter(|x| *x >= 0);
     cipher(&mut v, id(r.algid), id(r.key_id), r.decrypted);
-    v
+    d.with_id(c.system, v)
 }
 
 /// Each transmission of a recorded call (`unit_topic/<short name>/end`).
@@ -368,7 +390,7 @@ pub fn unit_ends(d: &Directory, c: &ConcludedCall) -> Vec<Value> {
                 head["lat"] = json!(lat);
                 head["lon"] = json!(lon);
             }
-            head
+            d.with_id(c.system, head)
         })
         .collect()
 }
@@ -396,7 +418,7 @@ pub fn unit_event(d: &Directory, e: &UnitEvent) -> Option<(&'static str, Value)>
         (_, Some(tg)) => extend(head, d.tg_fields(e.system, tg, &[])),
         (_, None) => head,
     };
-    Some((sub, body))
+    Some((sub, d.with_id(e.system, body)))
 }
 
 /// Control channel decode rates (`rates`); conventional channels have none.
@@ -404,15 +426,23 @@ pub fn rates(d: &Directory, s: &Status, interval: f64) -> Value {
     Value::Array(
         s.systems
             .iter()
-            .filter(|y| !d.conventional(y.index) && d.published(&y.short_name))
+            .filter(|y| !d.conventional(y.scope.index) && d.published(&y.scope.short_name))
             .map(|y| {
-                json!({
-                    "sys_num": d.sys_num(y.index),
-                    "sys_name": y.short_name,
-                    "decoderate": round2(y.decode_rate),
-                    "decoderate_interval": round2(interval),
-                    "control_channel": y.control_channel_hz.unwrap_or(0) as f64,
-                })
+                let mut v = d.with_id(
+                    y.scope.index,
+                    json!({
+                        "sys_num": d.sys_num(y.scope.index),
+                        "sys_name": y.scope.short_name,
+                        "decoderate": round2(y.decode_rate),
+                        "decoderate_interval": round2(interval),
+                        "control_channel": y.scope.control_channel_hz.unwrap_or(0) as f64,
+                    }),
+                );
+                // A system of several sites has a rate for each: which this is.
+                if !y.scope.site_name.is_empty() && y.scope.site_name != y.scope.short_name {
+                    v["site_name"] = json!(y.scope.site_name);
+                }
+                v
             })
             .collect(),
     )
@@ -435,16 +465,19 @@ fn system_at(d: &Directory, i: usize) -> Value {
     let (index, name, kind) = &d.systems[i];
     let id = d.identity.get(index).copied().unwrap_or_default();
     let hex = |v: Option<u32>| format!("{:X}", v.unwrap_or(0));
-    json!({
-        "sys_num": i,
-        "sys_name": name,
-        "type": kind,
-        "sysid": hex(id.sys_id),
-        "wacn": hex(id.wacn),
-        "nac": hex(id.nac),
-        "rfss": id.rfss.unwrap_or(0),
-        "site_id": id.site.unwrap_or(0),
-    })
+    d.with_id(
+        *index,
+        json!({
+            "sys_num": i,
+            "sys_name": name,
+            "type": kind,
+            "sysid": hex(id.sys_id),
+            "wacn": hex(id.wacn),
+            "nac": hex(id.nac),
+            "rfss": id.rfss.unwrap_or(0),
+            "site_id": id.site.unwrap_or(0),
+        }),
+    )
 }
 
 /// What the recorder is set up with (`config`, retained).
@@ -454,7 +487,7 @@ pub fn config(d: &Directory, capture_dir: &Path, instance_id: &str) -> Value {
         .iter()
         .enumerate()
         .filter(|(_, s)| d.published(&s.1))
-        .map(|(i, (_, name, kind))| json!({ "sys_num": i, "sys_name": name, "system_type": kind }))
+        .map(|(i, (index, name, kind))| d.with_id(*index, json!({ "sys_num": i, "sys_name": name, "system_type": kind })))
         .collect();
     json!({ "systems": systems, "capture_dir": capture_dir.display().to_string(), "instance_id": instance_id })
 }
@@ -462,7 +495,7 @@ pub fn config(d: &Directory, capture_dir: &Path, instance_id: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trunk_recorder_plugin::{CallRecord, ErrorInterval, SrcEntry, SystemStatus};
+    use trunk_recorder_plugin::{CallRecord, ErrorInterval, SiteIdentity, SiteScope, SrcEntry, SystemStatus};
 
     fn dir() -> Directory {
         Directory {
@@ -586,8 +619,12 @@ mod tests {
         let s = Status {
             time: 0.0,
             systems: vec![
-                SystemStatus { index: 1, short_name: "west".into(), control_channel_hz: Some(851_012_500), decode_rate: 38.456, ..Default::default() },
-                SystemStatus { index: 2, short_name: "conv".into(), ..Default::default() },
+                SystemStatus {
+                    scope: SiteScope { index: 1, short_name: "west".into(), control_channel_hz: Some(851_012_500), ..Default::default() },
+                    decode_rate: 38.456,
+                    ..Default::default()
+                },
+                SystemStatus { scope: SiteScope { index: 2, short_name: "conv".into(), ..Default::default() }, ..Default::default() },
             ],
         };
         let v = rates(&d, &s, 5.0);
@@ -599,15 +636,24 @@ mod tests {
     fn systems_take_their_identity_as_it_is_stated() {
         let mut d = dir();
         let status = |y: SystemStatus| Status { time: 0.0, systems: vec![y] };
-        let west = SystemStatus { index: 1, short_name: "west".into(), ..Default::default() };
+        let west = SystemStatus { scope: SiteScope { index: 1, short_name: "west".into(), ..Default::default() }, ..Default::default() };
         // Nothing stated yet: zeros, as Trunk Recorder sends them, and nothing changed.
         assert!(d.learn_identity(&status(west.clone())).is_empty());
         let v = systems(&d);
         assert_eq!((v[1]["sysid"].as_str(), v[1]["wacn"].as_str(), v[1]["nac"].as_str(), v[1]["rfss"].as_u64()), (Some("0"), Some("0"), Some("0"), Some(0)));
         // The control channel names the system, then the site.
-        let named = SystemStatus { nac: Some(0xBCC), wacn: Some(0xBBBBB), sys_id: Some(0x555), ..west.clone() };
+        let named = SystemStatus {
+            scope: SiteScope {
+                identity: SiteIdentity { nac: Some(0xBCC), wacn: Some(0xBBBBB), sys_id: Some(0x555), ..Default::default() },
+                ..west.scope.clone()
+            },
+            ..west.clone()
+        };
         assert_eq!(d.learn_identity(&status(named)), [1]);
-        let sited = SystemStatus { rfss: Some(1), site: Some(7), ..west.clone() };
+        let sited = SystemStatus {
+            scope: SiteScope { identity: SiteIdentity { rfss: Some(1), site: Some(7), ..Default::default() }, ..west.scope.clone() },
+            ..west.clone()
+        };
         assert_eq!(d.learn_identity(&status(sited)), [1]);
         let v = system(&d, 1).unwrap();
         assert_eq!(v, json!({ "sys_num": 1, "sys_name": "west", "type": "p25", "sysid": "555", "wacn": "BBBBB", "nac": "BCC", "rfss": 1, "site_id": 7 }));
@@ -616,6 +662,36 @@ mod tests {
         assert!(d.learn_identity(&status(west)).is_empty());
         assert_eq!(system(&d, 1).unwrap()["site_id"], 7);
         assert!(system(&d, 9).is_none());
+    }
+
+    #[test]
+    fn a_system_of_several_sites_is_its_first_sites() {
+        let mut d = dir();
+        d.set_ids([(0, 0), (1, 4)]);
+        let site = |name: &str, site: u32, rate: f64| SystemStatus {
+            scope: SiteScope {
+                index: 1,
+                short_name: "west".into(),
+                site_name: name.into(),
+                identity: SiteIdentity { sys_id: Some(0x555), site: Some(site), ..Default::default() },
+                ..Default::default()
+            },
+            decode_rate: rate,
+            ..Default::default()
+        };
+        let s = Status { time: 0.0, systems: vec![site("west-a", 1, 40.0), site("west-b", 2, 20.0)] };
+        // Its identity is its first site's, and stays put from one status to the next.
+        assert_eq!(d.learn_identity(&s), [1]);
+        assert!(d.learn_identity(&s).is_empty());
+        let v = system(&d, 1).unwrap();
+        assert_eq!((v["site_id"].as_u64(), v["sys_id"].as_u64()), (Some(1), Some(4)));
+        // A rate for each site, named; the system's id last, after Trunk Recorder's fields.
+        let r = rates(&d, &s, 5.0);
+        assert_eq!(r.as_array().unwrap().iter().map(|x| x["site_name"].as_str().unwrap()).collect::<Vec<_>>(), ["west-a", "west-b"]);
+        assert_eq!(r[0].as_object().unwrap().keys().last().map(String::as_str), Some("site_name"));
+        assert_eq!(r[0]["sys_id"], 4);
+        // No id from an older recorder: no sys_id.
+        assert!(systems(&d)[0].get("sys_id").is_none());
     }
 
     #[test]
@@ -632,8 +708,8 @@ mod tests {
         let s = Status {
             time: 0.0,
             systems: vec![
-                SystemStatus { index: 0, short_name: "east".into(), decode_rate: 40.0, ..Default::default() },
-                SystemStatus { index: 1, short_name: "west".into(), decode_rate: 39.0, ..Default::default() },
+                SystemStatus { scope: SiteScope { index: 0, short_name: "east".into(), ..Default::default() }, decode_rate: 40.0, ..Default::default() },
+                SystemStatus { scope: SiteScope { index: 1, short_name: "west".into(), ..Default::default() }, decode_rate: 39.0, ..Default::default() },
             ],
         };
         assert_eq!(names(&rates(&d, &s, 1.0)), ["west"]);
