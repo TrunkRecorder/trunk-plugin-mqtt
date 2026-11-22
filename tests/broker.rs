@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use trunk_recorder_plugin::{testing, CallInfo, HostMessage, Shutdown, Status, SystemInfo, SystemStatus, UnitEvent};
+use trunk_recorder_plugin::{testing, CallInfo, HostMessage, Shutdown, SiteIdentity, SiteScope, Status, SystemInfo, SystemStatus, UnitEvent};
 
 struct Broker {
     child: Child,
@@ -116,15 +116,14 @@ fn publishes_to_a_broker() {
     let status = Status {
         time: now,
         systems: vec![SystemStatus {
-            index: 0,
-            short_name: "sys1".into(),
-            control_channel_hz: Some(851_000_000),
+            scope: SiteScope {
+                index: 0,
+                short_name: "sys1".into(),
+                control_channel_hz: Some(851_000_000),
+                identity: SiteIdentity { nac: Some(0xBCC), wacn: Some(0xBBBBB), sys_id: Some(0x555), rfss: Some(1), site: Some(7), ..Default::default() },
+                ..Default::default()
+            },
             decode_rate: 40.0,
-            nac: Some(0xBCC),
-            wacn: Some(0xBBBBB),
-            sys_id: Some(0x555),
-            rfss: Some(1),
-            site: Some(7),
             ..Default::default()
         }],
     };
@@ -254,11 +253,14 @@ fn systems_left_out_arent_published() {
         ..Default::default()
     };
     let rate = |index: u16, short_name: &str| SystemStatus {
-        index,
-        short_name: short_name.into(),
-        control_channel_hz: Some(851_000_000),
+        scope: SiteScope {
+            index,
+            short_name: short_name.into(),
+            control_channel_hz: Some(851_000_000),
+            identity: SiteIdentity { sys_id: Some(0x555), ..Default::default() },
+            ..Default::default()
+        },
         decode_rate: 40.0,
-        sys_id: Some(0x555),
         ..Default::default()
     };
     let status = Status { time: now, systems: vec![rate(0, "sys1"), rate(1, "dmr")] };
