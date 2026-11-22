@@ -688,7 +688,7 @@ mod tests {
         // A rate for each site, named; the system's id last, after Trunk Recorder's fields.
         let r = rates(&d, &s, 5.0);
         assert_eq!(r.as_array().unwrap().iter().map(|x| x["site_name"].as_str().unwrap()).collect::<Vec<_>>(), ["west-a", "west-b"]);
-        assert_eq!(r[0].as_object().unwrap().keys().last().map(String::as_str), Some("site_name"));
+        assert_eq!(r[0].as_object().unwrap().keys().next_back().map(String::as_str), Some("site_name"));
         assert_eq!(r[0]["sys_id"], 4);
         // No id from an older recorder: no sys_id.
         assert!(systems(&d)[0].get("sys_id").is_none());
